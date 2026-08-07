@@ -80,6 +80,10 @@ cargo deny check licenses sources
 
 ## Related projects and acknowledgements
 
+[htmx](https://htmx.org/) helped popularize the HTML-over-the-wire,
+hypermedia-driven approach that inspired Hemx. Hemx is an independent
+implementation and does not bundle htmx.
+
 Hemx builds on [Hemplate](https://github.com/tmk241/hemplate),
 [Tokio](https://github.com/tokio-rs/tokio),
 [Axum](https://github.com/tokio-rs/axum), and the Rust procedural-macro
