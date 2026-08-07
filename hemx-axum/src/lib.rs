@@ -14,7 +14,7 @@ use std::pin::Pin;
 pub const HEMX_PARTIAL_HEADER: &str = "x-hemx-partial";
 pub const HEMX_FINGERPRINT_HEADER: &str = "x-hemx-fingerprint";
 pub const HEMX_TITLE_HEADER: &str = "x-hemx-title";
-pub use hemx_core::HEMX_CONTENT_TYPE;
+pub const HEMX_CONTENT_TYPE: &str = "application/hemx";
 pub const HEMX_HANDLE_FIELD: &str = "__h";
 pub const HEMX_RUNTIME_CONTENT_TYPE: &str = "application/javascript; charset=utf-8";
 pub const HEMX_SSE_EVENT: &str = "hemx";
