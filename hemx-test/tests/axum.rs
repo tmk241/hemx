@@ -5,8 +5,8 @@ use axum::http::{header, HeaderMap, HeaderValue, Method, Response, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect};
 use axum::routing::{get, post};
 use axum::Router;
-use hemx_axum::{EffectResponse, InteractionForm};
-use hemx_core::{BuildFingerprint, Handle, Slot, HEMX_CONTENT_TYPE};
+use hemx_axum::{EffectResponse, InteractionForm, HEMX_CONTENT_TYPE};
+use hemx_core::{BuildFingerprint, Handle, Slot};
 
 async fn effects() -> EffectResponse {
     EffectResponse::new(
