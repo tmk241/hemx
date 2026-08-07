@@ -1,3 +1,9 @@
+#![doc = include_str!("../README.md")]
+
+mod html;
+
+pub use html::{HtmlElement, HtmlInspectionError, HtmlInspector, HtmlSelection};
+
 use hemx_core::{
     Atom, BuildFingerprint, Effect, EffectBatch, Form, GeneratedTarget, IntoEffect, KeyedSlot,
     NavigateMode, Payload, ResourceId, ResourceKind, ResourceRef, ScopeKey, Slot,
@@ -81,6 +87,16 @@ fn inspection_fingerprint() -> BuildFingerprint {
 
 pub fn inspect(effect: impl IntoEffect) -> EffectInspector {
     inspect_batch(effect.into_batch(inspection_fingerprint()))
+}
+
+/// Parse and structurally inspect a complete server-rendered HTML document.
+pub fn inspect_html_document(html: impl Into<String>) -> HtmlInspector {
+    HtmlInspector::document(html.into(), String::from("HTML document"))
+}
+
+/// Parse and structurally inspect a server-rendered HTML fragment.
+pub fn inspect_html_fragment(html: impl Into<String>) -> HtmlInspector {
+    HtmlInspector::fragment(html.into(), String::from("HTML fragment"))
 }
 
 /// Inspect an already-dispatched batch without matching raw effect variants in tests.
@@ -569,6 +585,87 @@ impl EffectInspector {
                 } if target.resource == resource && html.contains(needle)
             )
         })
+    }
+
+    /// Parse the single HTML effect for a generated target as a complete document.
+    ///
+    /// Returns an error when no HTML operation targets the resource or when more
+    /// than one operation would make the selected payload ambiguous.
+    pub fn target_html_document(
+        &self,
+        target: impl GeneratedTarget,
+    ) -> Result<HtmlInspector, HtmlInspectionError> {
+        let resource = target.__hemx_resource_id();
+        let (html, operation) = self.single_target_html(resource)?;
+        Ok(HtmlInspector::document(
+            html.to_owned(),
+            format!("{operation} HTML effect for generated target {resource:?}"),
+        ))
+    }
+
+    /// Parse the single HTML effect for a generated target as a fragment.
+    ///
+    /// `Put`, `Insert`, and `Prepend` HTML payloads are supported. The parser is
+    /// kept internal; the returned inspector and all selected elements own their
+    /// observable data.
+    pub fn target_html_fragment(
+        &self,
+        target: impl GeneratedTarget,
+    ) -> Result<HtmlInspector, HtmlInspectionError> {
+        let resource = target.__hemx_resource_id();
+        let (html, operation) = self.single_target_html(resource)?;
+        Ok(HtmlInspector::fragment(
+            html.to_owned(),
+            format!("{operation} HTML effect for generated target {resource:?}"),
+        ))
+    }
+
+    fn single_target_html(
+        &self,
+        resource: ResourceId,
+    ) -> Result<(&str, &'static str), HtmlInspectionError> {
+        let target_effects = self
+            .batch
+            .ops
+            .iter()
+            .filter(|effect| op_targets_resource(effect, resource))
+            .collect::<Vec<_>>();
+        let html_effects = target_effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Put {
+                    payload: Payload::Html(html),
+                    ..
+                } => Some((html.as_str(), "Put")),
+                Effect::Insert {
+                    payload: Payload::Html(html),
+                    ..
+                } => Some((html.as_str(), "Insert")),
+                Effect::Prepend {
+                    payload: Payload::Html(html),
+                    ..
+                } => Some((html.as_str(), "Prepend")),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        match html_effects.as_slice() {
+            [only] => Ok(*only),
+            [] => {
+                let actual = if target_effects.is_empty() {
+                    format!("all effects: {:#?}", self.batch.ops)
+                } else {
+                    format!("effects for target: {target_effects:#?}")
+                };
+                Err(HtmlInspectionError::new(format!(
+                    "expected one HTML effect for generated target {resource:?}, but found none; {actual}"
+                )))
+            }
+            many => Err(HtmlInspectionError::new(format!(
+                "expected one HTML effect for generated target {resource:?}, but found {} and cannot choose a document or fragment payload; effects for target: {target_effects:#?}",
+                many.len()
+            ))),
+        }
     }
 
     /// Assert that a keyed generated target is replaced with HTML containing text.

@@ -12,6 +12,7 @@ categories = ["development-tools::testing", "web-programming"]
 
 [dependencies]
 hemx-core = { version = "0.1.0", path = "../hemx-core" }
+scraper = "0.25.0"
 
 [dev-dependencies]
 hemx-build = { version = "0.1.0", path = "../hemx-build" }
