@@ -12,8 +12,3 @@ repository = "https://github.com/tmk241/hemx"
 [profile.release]
 opt-level = "z"
 lto = true
-
-# Bridge dependencies that still require yanked spin 0.9 to its maintained
-# successor without introducing a second implementation.
-[patch.crates-io]
-spin = { path = "compat/spin" }

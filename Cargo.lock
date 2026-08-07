@@ -1201,7 +1201,7 @@ dependencies = [
  "httparse",
  "memchr",
  "mime",
- "spin 0.9.8",
+ "spin",
  "version_check",
 ]
 
@@ -1905,16 +1905,9 @@ dependencies = [
 
 [[package]]
 name = "spin"
-version = "0.9.8"
-dependencies = [
- "spin 0.12.2",
-]
-
-[[package]]
-name = "spin"
-version = "0.12.2"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8abadc99fd9c7bbb7d0ca2b31d72a067d0c0dcd7aad25ab8cac71ba91417694b"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 
 [[package]]
 name = "stable_deref_trait"
