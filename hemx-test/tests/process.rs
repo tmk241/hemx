@@ -92,10 +92,10 @@ fn early_exit_reports_bounded_stdout_and_stderr() {
 #[test]
 fn timeout_reports_readiness_attempts_output_and_cleanup() {
     let address = unused_loopback_addr();
-    let error = TestProcess::builder(current_test_command("helper_process_sleeps"))
-        .label("non-listening helper")
-        .env("HEMX_TEST_PROCESS_SLEEP", "1")
-        .tcp(&address)
+    let error = TestProcess::builder(current_test_command("helper_process_stays_unready"))
+        .label("unready HTTP helper")
+        .env("HEMX_TEST_PROCESS_ADDR", &address)
+        .http(&address, "/health")
         .timeout(Duration::from_millis(100))
         .poll_interval(Duration::from_millis(10))
         .start()
@@ -104,9 +104,9 @@ fn timeout_reports_readiness_attempts_output_and_cleanup() {
 
     assert!(matches!(error, ProcessError::TimedOut { .. }));
     assert!(message.contains("timed out"), "{message}");
-    assert!(message.contains("non-listening helper"), "{message}");
+    assert!(message.contains("unready HTTP helper"), "{message}");
     assert!(message.contains("readiness attempts"), "{message}");
-    assert!(message.contains("sleeping helper started"), "{message}");
+    assert!(message.contains("unready helper started"), "{message}");
 }
 
 #[test]
@@ -226,6 +226,25 @@ fn helper_process_serves_http() {
         .unwrap();
     }
     std::thread::sleep(Duration::from_secs(10));
+}
+
+#[test]
+fn helper_process_stays_unready() {
+    let Ok(address) = std::env::var("HEMX_TEST_PROCESS_ADDR") else {
+        return;
+    };
+    let listener = TcpListener::bind(address).expect("bind unready helper listener");
+    println!("unready helper started");
+    loop {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 512];
+        let _ = stream.read(&mut request);
+        write!(
+            stream,
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+    }
 }
 
 #[test]
