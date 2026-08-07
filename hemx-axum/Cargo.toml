@@ -1,0 +1,25 @@
+[package]
+name = "hemx-axum"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Axum integration for Hemx applications"
+keywords = ["axum", "hypermedia", "html", "web"]
+categories = ["web-programming"]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["multipart", "tokio"] }
+futures-util = { version = "0.3", default-features = false }
+hemx-core = { version = "0.1.0", path = "../hemx-core" }
+hemx-js = { version = "0.1.0", path = "../hemx-js" }
+
+[dev-dependencies]
+scraper = "0.25"
+tokio = { version = "1", features = ["macros", "rt"] }
+tower = { version = "0.5", features = ["util"] }

@@ -1,0 +1,30 @@
+[package]
+name = "hemx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Checked hypermedia for Rust applications"
+keywords = ["hypermedia", "html", "web", "rust"]
+categories = ["web-programming"]
+
+[lib]
+path = "src/lib.rs"
+
+[[bench]]
+name = "render"
+harness = false
+
+[features]
+default = []
+client = ["dep:hemx-wasm"]
+
+[dependencies]
+hemx-core = { version = "0.1.0", path = "../hemx-core" }
+hemx-derive = { version = "0.1.0", path = "../hemx-derive" }
+hemx-wasm = { version = "0.1.0", path = "../hemx-wasm", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+hemplate = { version = "0.1.0" }

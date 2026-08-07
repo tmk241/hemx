@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["hemx", "hemx-core", "hemx-host", "hemx-derive", "hemx-js", "hemx-axum", "hemx-build", "hemx-test", "hemx-sync", "hemx-sync-macros", "hemx-wasm"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/tmk241/hemx"
+
+[profile.release]
+opt-level = "z"
+lto = true
+
+# Bridge dependencies that still require yanked spin 0.9 to its maintained
+# successor without introducing a second implementation.
+[patch.crates-io]
+spin = { path = "compat/spin" }

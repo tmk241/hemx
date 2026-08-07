@@ -1,0 +1,21 @@
+[package]
+name = "hemx-build"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Build-time resource generation for Hemx"
+keywords = ["hypermedia", "codegen", "html", "web"]
+categories = ["development-tools::build-utils", "web-programming"]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+hemplate-core = { version = "0.1.0", features = ["surface"] }
+hemx-core = { version = "0.1.0", path = "../hemx-core" }
+quote = "1"
+serde_json = "1"
+syn = { version = "2", features = ["full"] }

@@ -1,0 +1,17 @@
+[package]
+name = "hemx-test"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Test support for Hemx applications"
+keywords = ["hypermedia", "testing", "web"]
+categories = ["development-tools::testing", "web-programming"]
+
+[dependencies]
+hemx-core = { version = "0.1.0", path = "../hemx-core" }
+
+[dev-dependencies]
+hemx-build = { version = "0.1.0", path = "../hemx-build" }

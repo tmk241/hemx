@@ -1,0 +1,20 @@
+[package]
+name = "hemx-derive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Procedural macros for Hemx"
+keywords = ["hypermedia", "derive", "proc-macro"]
+categories = ["development-tools::procedural-macro-helpers", "web-programming"]
+
+[lib]
+proc-macro = true
+path = "src/lib.rs"
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

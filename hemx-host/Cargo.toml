@@ -1,0 +1,24 @@
+[package]
+name = "hemx-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Typed host capabilities for Hemx applications"
+keywords = ["hypermedia", "capabilities", "web"]
+categories = ["web-programming"]
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["std"]
+std = ["serde/std"]
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+
+[dev-dependencies]
+hemx-core = { version = "0.1.0", path = "../hemx-core" }

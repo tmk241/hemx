@@ -1,0 +1,17 @@
+[package]
+name = "hemx-js"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Browser runtime assets for Hemx"
+keywords = ["hypermedia", "javascript", "web"]
+categories = ["web-programming"]
+
+[lib]
+path = "src/lib.rs"
+
+[build-dependencies]
+sha2 = "0.10"
