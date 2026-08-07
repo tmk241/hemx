@@ -10,6 +10,7 @@ use hemx_core::{KeyedSlot, Slot};
 pub use hemx_core::{
     navigate, push, redirect, replace, CssClass, CssClasses, Effect, Form, FormContract,
     FormControlKind, FormError, FormField, FormModel, FormValue, FromForm, IntoEffect,
+    HEMX_CONTENT_TYPE,
 };
 
 /// Generated metadata tokens used by macros, generated code, integrations, and tests.

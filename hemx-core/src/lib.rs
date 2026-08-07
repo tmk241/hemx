@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 
 pub const SURFACE_SCHEMA_VERSION: u32 = 1;
 pub const EFFECT_BATCH_ABI_VERSION: u32 = 1;
+/// Media type for the versioned Hemx effect wire format.
+pub const HEMX_CONTENT_TYPE: &str = "application/hemx";
 pub const RUNTIME_ABI_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]

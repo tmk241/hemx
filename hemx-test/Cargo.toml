@@ -10,9 +10,17 @@ description = "Test support for Hemx applications"
 keywords = ["hypermedia", "testing", "web"]
 categories = ["development-tools::testing", "web-programming"]
 
+[features]
+default = []
+axum = ["dep:axum", "dep:tower"]
+
 [dependencies]
+axum = { version = "0.8.8", optional = true, default-features = false }
 hemx-core = { version = "0.1.0", path = "../hemx-core" }
 scraper = "0.25.0"
+tower = { version = "0.5.2", optional = true, features = ["util"] }
 
 [dev-dependencies]
+hemx-axum = { version = "0.1.0", path = "../hemx-axum" }
 hemx-build = { version = "0.1.0", path = "../hemx-build" }
+tokio = { version = "1.48.0", features = ["macros", "rt"] }

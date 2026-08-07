@@ -105,6 +105,34 @@ assert_eq!(error, Rejected);
 `IntoEffect` conversion itself is infallible in the current public contract, so
 handler errors and inspected success effects remain distinct.
 
+## Axum routers
+
+Enable the `axum` feature to send owned requests through a real `axum::Router`.
+The response always preserves status, headers, and raw body bytes; parse it as a
+Hemx effect batch or structural HTML only when that is the response contract.
+
+```rust
+# #[cfg(feature = "axum")]
+# async fn example() -> Result<(), hemx_test::axum::RouterTestError> {
+use axum::{response::Html, routing::get, Router};
+use axum::http::StatusCode;
+
+let app = Router::new().route(
+    "/",
+    get(|| async { Html("<main id=app>Ready</main>") }),
+);
+let response = hemx_test::axum::get("/").send(app).await?;
+assert_eq!(response.status(), StatusCode::OK);
+response.html_fragment()?.assert_text("main#app", "Ready");
+# Ok(())
+# }
+```
+
+`post(...).form(handle, fields)` builds the URL-encoded interaction body from a
+typed Hemx handle. Authentication, CSRF, sessions, persistence, middleware, and
+test providers remain application-owned. This in-process harness does not prove
+real sockets, process startup, or browser behavior.
+
 ## License
 
 MIT

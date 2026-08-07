@@ -745,9 +745,13 @@ dependencies = [
 name = "hemx-test"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "hemx-axum",
  "hemx-build",
  "hemx-core",
  "scraper",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

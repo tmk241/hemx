@@ -1,5 +1,7 @@
 #![doc = include_str!("../README.md")]
 
+#[cfg(feature = "axum")]
+pub mod axum;
 mod html;
 
 pub use html::{HtmlElement, HtmlInspectionError, HtmlInspector, HtmlSelection};
@@ -148,10 +150,13 @@ pub fn inspect_batch(batch: EffectBatch) -> EffectInspector {
 
 /// Decode and inspect an effect wire response without exposing `EffectBatch` in tests.
 pub fn inspect_wire(bytes: &[u8]) -> EffectInspector {
-    inspect_batch(
-        EffectBatch::from_wire(bytes)
-            .unwrap_or_else(|error| panic!("invalid hemx effect wire response: {error:?}")),
-    )
+    try_inspect_wire(bytes)
+        .unwrap_or_else(|error| panic!("invalid hemx effect wire response: {error:?}"))
+}
+
+/// Try to decode and inspect an effect wire response.
+pub fn try_inspect_wire(bytes: &[u8]) -> Result<EffectInspector, hemx_core::WireError> {
+    EffectBatch::from_wire(bytes).map(inspect_batch)
 }
 
 /// Return the resource id behind a generated target for low-level test assertions.
