@@ -133,6 +133,39 @@ typed Hemx handle. Authentication, CSRF, sessions, persistence, middleware, and
 test providers remain application-owned. This in-process harness does not prove
 real sockets, process startup, or browser behavior.
 
+## Processes
+
+Use `TestProcess` only when the process and socket lifecycle are part of the
+behavior under test. Readiness is explicit and bounded:
+
+```rust,no_run
+use hemx_test::TestProcess;
+use std::process::Command;
+use std::time::Duration;
+
+let process = TestProcess::builder(Command::new("target/debug/my-app"))
+    .label("application server")
+    .arg("serve")
+    .env("APP_ADDR", "127.0.0.1:4100")
+    .http("127.0.0.1:4100", "/health")
+    .timeout(Duration::from_secs(5))
+    .start()?;
+
+assert!(process.id().is_some());
+# Ok::<(), hemx_test::ProcessError>(())
+```
+
+TCP readiness proves only that something accepts the address; HTTP readiness
+requires a 2xx or 3xx response from the selected path. Startup errors include
+the process label, readiness attempts, exit status when available, and bounded
+stdout/stderr. Readers keep draining after the capture limit so noisy children
+do not deadlock. Explicit `shutdown` and `Drop` both kill, wait for, and reap a
+running child and are safe to call more than once.
+
+`TestProcess::start` remains available as the compact compatibility entry point
+for TCP readiness. The harness intentionally does not reserve ports or claim
+that a reserve-then-bind handoff is atomic.
+
 ## License
 
 MIT

@@ -3,78 +3,16 @@
 #[cfg(feature = "axum")]
 pub mod axum;
 mod html;
+mod process;
 
 pub use html::{HtmlElement, HtmlInspectionError, HtmlInspector, HtmlSelection};
+pub use process::{ProcessError, ProcessFailure, TestProcess, TestProcessBuilder};
 
 use hemx_core::{
     Atom, BuildFingerprint, Effect, EffectBatch, Form, GeneratedTarget, IntoEffect, KeyedSlot,
     NavigateMode, Payload, ResourceId, ResourceKind, ResourceRef, ScopeKey, Slot,
 };
 use std::future::Future;
-use std::io;
-use std::net::TcpStream;
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
-
-/// A child process owned by an integration test and proven ready over TCP.
-///
-/// The process is killed and reaped on every return path, including panics. Startup failures name
-/// the process and address and distinguish early exit from a readiness timeout.
-pub struct TestProcess {
-    child: Child,
-}
-
-fn test_process_try_wait(child: &mut Child) -> io::Result<Option<ExitStatus>> {
-    child.try_wait()
-}
-
-fn test_process_poll_delay() {
-    std::thread::sleep(Duration::from_millis(25));
-}
-
-impl TestProcess {
-    pub fn start(
-        mut command: Command,
-        label: impl Into<String>,
-        addr: &str,
-        timeout: Duration,
-    ) -> io::Result<Self> {
-        let label = label.into();
-        let child = command
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| {
-                io::Error::new(error.kind(), format!("failed to spawn {label}: {error}"))
-            })?;
-        let mut process = Self { child };
-        let deadline = Instant::now() + timeout;
-        loop {
-            if TcpStream::connect(addr).is_ok() {
-                return Ok(process);
-            }
-            if let Some(status) = test_process_try_wait(&mut process.child)? {
-                return Err(io::Error::other(format!(
-                    "{label} exited with {status} before listening on {addr}"
-                )));
-            }
-            if Instant::now() >= deadline {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("timed out after {timeout:?} waiting for {label} to listen on {addr}"),
-                ));
-            }
-            test_process_poll_delay();
-        }
-    }
-}
-
-impl Drop for TestProcess {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 
 /// Run a synchronous handler with typed input and inspect its effects.
 pub fn run<I, F, R>(handler: F, input: I) -> EffectInspector
