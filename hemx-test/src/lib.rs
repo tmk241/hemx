@@ -8,6 +8,7 @@ use hemx_core::{
     Atom, BuildFingerprint, Effect, EffectBatch, Form, GeneratedTarget, IntoEffect, KeyedSlot,
     NavigateMode, Payload, ResourceId, ResourceKind, ResourceRef, ScopeKey, Slot,
 };
+use std::future::Future;
 use std::io;
 use std::net::TcpStream;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -73,12 +74,53 @@ impl Drop for TestProcess {
     }
 }
 
+/// Run a synchronous handler with typed input and inspect its effects.
 pub fn run<I, F, R>(handler: F, input: I) -> EffectInspector
 where
     F: FnOnce(I) -> R,
     R: IntoEffect,
 {
     inspect(handler(input))
+}
+
+/// Run an asynchronous handler with typed input and inspect its effects.
+pub async fn run_async<I, F, HandlerFuture, R>(handler: F, input: I) -> EffectInspector
+where
+    F: FnOnce(I) -> HandlerFuture,
+    HandlerFuture: Future<Output = R>,
+    R: IntoEffect,
+{
+    inspect(handler(input).await)
+}
+
+/// Run a fallible synchronous handler without hiding its concrete error.
+///
+/// Only the successful value is converted into effects. `IntoEffect`
+/// conversion is infallible in the current public contract, so an error from
+/// the handler is returned unchanged rather than becoming an empty or
+/// success-looking batch.
+pub fn run_result<I, F, R, E>(handler: F, input: I) -> Result<EffectInspector, E>
+where
+    F: FnOnce(I) -> Result<R, E>,
+    R: IntoEffect,
+{
+    handler(input).map(inspect)
+}
+
+/// Run a fallible asynchronous handler without hiding its concrete error.
+///
+/// Only the successful value is converted into effects; the handler's original
+/// error type and value are preserved.
+pub async fn run_async_result<I, F, HandlerFuture, R, E>(
+    handler: F,
+    input: I,
+) -> Result<EffectInspector, E>
+where
+    F: FnOnce(I) -> HandlerFuture,
+    HandlerFuture: Future<Output = Result<R, E>>,
+    R: IntoEffect,
+{
+    handler(input).await.map(inspect)
 }
 
 fn inspection_fingerprint() -> BuildFingerprint {

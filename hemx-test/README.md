@@ -54,6 +54,57 @@ payload for that generated target. Missing, non-HTML, and ambiguous target
 effects return `HtmlInspectionError` with the relevant effects in the
 diagnostic.
 
+## Handlers
+
+`run` and `run_async` invoke typed synchronous and asynchronous handlers and
+return the same `EffectInspector`:
+
+```rust
+use hemx_core::{Effect, GeneratedTarget, ResourceId, Slot};
+# #[derive(Clone, Copy)]
+# struct GeneratedCount(Slot<u32>);
+# impl GeneratedTarget for GeneratedCount {
+#     fn __hemx_resource_id(self) -> ResourceId { self.0.id() }
+# }
+
+async fn load_count(value: u32) -> Effect {
+    Slot::<u32>::new(1).text(value)
+}
+
+# async fn example() {
+let count = GeneratedCount(Slot::new(1));
+let inspected = hemx_test::run_async(load_count, 42).await;
+assert!(inspected.updates_text_containing(count, "42"));
+# }
+```
+
+Fallible handlers use `run_result` or `run_async_result`. Their concrete error
+is returned unchanged and is never converted into an empty or success-looking
+effect batch:
+
+```rust
+use hemx_core::{Effect, Slot};
+
+#[derive(Debug, Eq, PartialEq)]
+struct Rejected;
+
+async fn save(accepted: bool) -> Result<Effect, Rejected> {
+    accepted
+        .then(|| Slot::<()>::new(1).text("saved"))
+        .ok_or(Rejected)
+}
+
+# async fn example() {
+let error = hemx_test::run_async_result(save, false)
+    .await
+    .unwrap_err();
+assert_eq!(error, Rejected);
+# }
+```
+
+`IntoEffect` conversion itself is infallible in the current public contract, so
+handler errors and inspected success effects remain distinct.
+
 ## License
 
 MIT
