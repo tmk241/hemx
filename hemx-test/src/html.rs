@@ -1,3 +1,4 @@
+use hemx_core::{GeneratedTarget, Handle, ResourceKind};
 use scraper::{Html, Selector};
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -81,6 +82,32 @@ impl HtmlInspector {
             source: Arc::clone(&self.source),
             elements,
         })
+    }
+
+    /// Select elements carrying the runtime marker for a generated target.
+    pub fn select_target(&self, target: impl GeneratedTarget) -> HtmlSelection {
+        let resource = target.__hemx_resource_id();
+        self.selection_or_panic(&attribute_selector(
+            resource_attribute(resource.kind),
+            &resource.id.to_string(),
+        ))
+    }
+
+    /// Assert that rendered HTML contains a generated target marker.
+    #[track_caller]
+    pub fn assert_target(&self, target: impl GeneratedTarget) {
+        self.select_target(target).assert_exists();
+    }
+
+    /// Select elements carrying the runtime marker for a typed handle.
+    pub fn select_handle<I>(&self, handle: Handle<I>) -> HtmlSelection {
+        self.selection_or_panic(&attribute_selector("data-hid", &handle.to_string()))
+    }
+
+    /// Assert that rendered HTML contains a typed handle marker.
+    #[track_caller]
+    pub fn assert_handle<I>(&self, handle: Handle<I>) {
+        self.select_handle(handle).assert_exists();
     }
 
     /// Assert that at least one element matches a CSS selector.
@@ -269,6 +296,20 @@ impl fmt::Display for HtmlInspectionError {
 }
 
 impl Error for HtmlInspectionError {}
+
+fn resource_attribute(kind: ResourceKind) -> &'static str {
+    match kind {
+        ResourceKind::Slot => "data-sid",
+        ResourceKind::Atom => "data-aid",
+        ResourceKind::Handle => "data-hid",
+        ResourceKind::Form => "data-fid",
+    }
+}
+
+fn attribute_selector(name: &str, value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(r#"[{name}="{escaped}"]"#)
+}
 
 fn normalize_text<'a>(text: impl Iterator<Item = &'a str>) -> String {
     text.flat_map(str::split_whitespace)

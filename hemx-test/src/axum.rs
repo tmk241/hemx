@@ -2,11 +2,14 @@ use crate::{handle_form_body, inspect_html_document, inspect_html_fragment, try_
 use axum::body::{to_bytes, Body};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::Router;
-use hemx_core::{Handle, WireError, HEMX_CONTENT_TYPE};
+use hemx_core::{Handle, WireError};
 use std::error::Error;
 use std::fmt;
 use tower::ServiceExt;
 
+// Keep this private until the hemx-core release carrying its public constant is
+// the minimum supported dependency of hemx-test.
+const HEMX_CONTENT_TYPE: &str = "application/hemx";
 const HTML_CONTENT_TYPE: &str = "text/html";
 const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
 const DEFAULT_BODY_LIMIT: usize = 2 * 1024 * 1024;

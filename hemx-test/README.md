@@ -6,6 +6,19 @@ Test support for Hemx applications and generated resources.
 an `EffectInspector` with generated targets instead of copying resource IDs or
 matching raw wire operations.
 
+## Choose the owning boundary
+
+| Behavior under test | Smallest authoritative proof |
+| --- | --- |
+| Domain invariants and state transitions | Ordinary Rust unit tests; no Hemx harness |
+| Handler output and generated-target effects | `run`, `run_async`, `run_result`, or `run_async_result` plus `EffectInspector` |
+| Static document or effect-fragment structure | `HtmlInspector`, reached directly or through `target_html_document` / `target_html_fragment` |
+| Axum extraction, middleware, status, headers, and response body | The opt-in `hemx_test::axum` router harness |
+| Real process startup, readiness, sockets, logs, and cleanup | `TestProcess::builder` |
+| JavaScript, focus, history, layout, or runtime reconciliation | A focused real-browser test outside `hemx-test` |
+
+## Effects and structural HTML
+
 ```rust
 use hemx_core::{GeneratedTarget, SafeHtml, Slot};
 # use hemx_core::{Effect, ResourceId};
@@ -38,9 +51,16 @@ Complete server-rendered pages can be inspected directly:
 
 ```rust
 let page = hemx_test::inspect_html_document(
-    "<!doctype html><html><body><main id=app>Ready</main></body></html>",
+    "<!doctype html><html><body><main id=app data-sid=7>Ready</main></body></html>",
 );
 page.assert_text("main#app", "Ready");
+# use hemx_core::{GeneratedTarget, ResourceId, Slot};
+# #[derive(Clone, Copy)]
+# struct GeneratedApp(Slot<()>);
+# impl GeneratedTarget for GeneratedApp {
+#     fn __hemx_resource_id(self) -> ResourceId { self.0.id() }
+# }
+page.assert_target(GeneratedApp(Slot::new(7)));
 ```
 
 Structural inspection is backed internally by an HTML parser, but its types are
@@ -165,6 +185,29 @@ running child and are safe to call more than once.
 `TestProcess::start` remains available as the compact compatibility entry point
 for TCP readiness. The harness intentionally does not reserve ports or claim
 that a reserve-then-bind handoff is atomic.
+
+## Migrating selector helpers
+
+The original `0.1.0` crate exposed app-specific CSS builders and island/browser
+probe helpers. They duplicated CSS syntax, made application structure look like
+a framework contract, and could not prove browser behavior. They are removed
+from the next release rather than preserved as a second testing vocabulary.
+
+- Replace semantic selector builders such as `article_selector`,
+  `class_selector`, and `nav_link_selector` with the CSS selector that expresses
+  the application's own HTML contract in `HtmlInspector`.
+- Replace `assert_rendered_target` and `assert_rendered_handle` with
+  `HtmlInspector::assert_target` and `HtmlInspector::assert_handle`; generated
+  resources remain the assertion vocabulary and raw runtime IDs stay private.
+- Replace `target_selector`, `handle_selector`, and keyed selector builders with
+  structural HTML assertions. Browser tests that genuinely need a selector
+  should keep that selector in their browser-test adapter.
+- Replace island probe scripts, readout selectors, event-name helpers, and SSE
+  marker strings with a focused real-browser journey; `hemx-test` does not
+  emulate JavaScript or runtime behavior.
+
+The generated-resource helpers for effect inspection and typed form bodies
+remain supported.
 
 ## License
 

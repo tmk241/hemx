@@ -42,6 +42,23 @@ fn inspects_complete_documents_with_owned_structure() {
 }
 
 #[test]
+fn inspects_generated_targets_and_handles_without_raw_runtime_ids() {
+    let target = TestTarget(ResourceKind::Slot, 42);
+    let handle = hemx_core::Handle::<()>::new(7);
+    let inspected = hemx_test::inspect_html_fragment(
+        r#"<section data-sid="42"><button data-hid="7">Save</button></section>"#,
+    );
+
+    inspected.assert_target(target);
+    inspected.assert_handle(handle);
+    assert_eq!(
+        inspected.select_target(target).elements()[0].name(),
+        "section"
+    );
+    assert_eq!(inspected.select_handle(handle).elements()[0].text(), "Save");
+}
+
+#[test]
 fn inspects_fragments_and_keeps_selections_owned() {
     let selection = {
         let inspected = hemx_test::inspect_html_fragment(
