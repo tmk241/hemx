@@ -2197,7 +2197,7 @@ fn rust_ident(name: &str) -> Option<String> {
 
 fn stable_id(kind: &str, symbol: &str) -> u32 {
     let mut hash = 0x811c9dc5u32;
-    for byte in kind.bytes().chain([b':']).chain(symbol.bytes()) {
+    for byte in kind.bytes().chain(*b":").chain(symbol.bytes()) {
         hash ^= byte as u32;
         hash = hash.wrapping_mul(0x01000193);
     }
