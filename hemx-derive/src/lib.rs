@@ -266,9 +266,7 @@ fn surface_include() -> String {
     } else {
         format!(
             " compile_error!({:?}); ",
-            format!(
-                "#[hemx::surface] could not find generated hemx module; add hemx_build::app().run()? to build.rs or check template generation"
-            )
+            "#[hemx::surface] could not find generated hemx module; add hemx_build::app().run()? to build.rs or check template generation"
         )
     }
 }
