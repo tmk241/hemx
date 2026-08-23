@@ -1478,14 +1478,14 @@ pub fn encode_sse_batch(batch: &EffectBatch) -> String {
 fn base64_url_no_pad(input: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity((input.len() * 4).div_ceil(3));
-    let mut chunks = input.chunks_exact(3);
-    for chunk in &mut chunks {
-        out.push(ALPHABET[(chunk[0] >> 2) as usize] as char);
-        out.push(ALPHABET[(((chunk[0] & 0x03) << 4) + (chunk[1] >> 4)) as usize] as char);
-        out.push(ALPHABET[(((chunk[1] & 0x0f) << 2) + (chunk[2] >> 6)) as usize] as char);
-        out.push(ALPHABET[(chunk[2] & 0x3f) as usize] as char);
+    let (chunks, remainder) = input.as_chunks::<3>();
+    for [a, b, c] in chunks {
+        out.push(ALPHABET[(a >> 2) as usize] as char);
+        out.push(ALPHABET[(((a & 0x03) << 4) + (b >> 4)) as usize] as char);
+        out.push(ALPHABET[(((b & 0x0f) << 2) + (c >> 6)) as usize] as char);
+        out.push(ALPHABET[(c & 0x3f) as usize] as char);
     }
-    match chunks.remainder() {
+    match remainder {
         [a] => {
             out.push(ALPHABET[(a >> 2) as usize] as char);
             out.push(ALPHABET[((a & 0x03) << 4) as usize] as char);
