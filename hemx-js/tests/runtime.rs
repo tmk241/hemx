@@ -1,6 +1,6 @@
 #[test]
 fn runtime_abi_version_is_explicit_and_stable() {
-    assert_eq!(hemx_js::RUNTIME_ABI_VERSION, 1); //
+    assert_eq!(hemx_js::RUNTIME_ABI_VERSION, 1);
 }
 
 #[test]

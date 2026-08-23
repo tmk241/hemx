@@ -4613,7 +4613,8 @@ fn main() {{
     let html = todo::lower_html(r#"<form data-hemx-handle="create"><input name="title"></form><li data-hemx-slot="row" h-key="7"></li>"#);
     assert!(html.contains(r#"data-hid="#));
     assert!(html.contains(r#"name="__h""#));
-    assert!(html.contains(r#"data-key="7""#));    assert!(!html.contains("h-key"));
+    assert!(html.contains(r#"data-key="7""#));
+    assert!(!html.contains("h-key"));
 }}
 "###,
         );

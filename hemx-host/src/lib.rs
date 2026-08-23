@@ -382,7 +382,6 @@ impl HostCall {
 }
 
 /// Boring, typed host failure classes that app code can handle before it emits UI.
-///
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum HostFailureKind {
     PermissionDenied,
@@ -392,7 +391,6 @@ pub enum HostFailureKind {
 }
 
 /// One host failure result shape for denied, timeout, unavailable, and error cases.
-///
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HostFailure {
     pub id: Option<HostCallId>,
