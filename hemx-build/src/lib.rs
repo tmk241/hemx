@@ -2623,9 +2623,7 @@ mod tests {
                     )
                     .unwrap_err()
                     .to_string(),
-                format!(
-                    "duplicate generated identifier `shared` for `first.heml::shared` and `second.heml::shared`"
-                ),
+                "duplicate generated identifier `shared` for `first.heml::shared` and `second.heml::shared`",
                 "{kind} collision must propagate"
             );
         }
