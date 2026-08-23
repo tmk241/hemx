@@ -352,7 +352,6 @@ impl InteractionForm {
         Self::from_parts(parse_urlencoded_pairs(body)?, Vec::new())
     }
 
-    // ,
     pub async fn parse_multipart(
         mut multipart: Multipart,
     ) -> Result<Self, InteractionFormRejection> {
@@ -1456,7 +1455,6 @@ pub fn runtime_js_route_path() -> &'static str {
     runtime_js_path()
 }
 
-// , ,
 pub fn sse<S, E>(batches: S) -> Sse<impl Stream<Item = Result<Event, E>> + Send>
 where
     S: Stream<Item = Result<EffectBatch, E>> + Send + 'static,
@@ -1633,7 +1631,6 @@ mod tests {
         ] {
             assert_eq!(base64_url_no_pad(input), expected);
         }
-        //  test
     }
 
     #[test]

@@ -465,7 +465,6 @@ impl EffectBatch {
     /// let batch = hemx_core::EffectBatch::new(hemx_core::BuildFingerprint(1));
     /// let _ = batch.to_postcard();
     /// ```
-    ///  test
     /// Return the exact number of bytes produced by [`Self::to_wire`].
     pub fn encoded_len(&self) -> usize {
         batch_wire_len(self)

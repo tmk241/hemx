@@ -138,13 +138,13 @@ fn runtime_supports_tiny_delay_and_revealed_scheduling() {
     assert!(source.contains("const revealObservers = new WeakMap()"));
     assert!(source.contains("const revealed = new WeakSet()"));
     assert!(source.contains("data-hemx-revealed"));
-    assert!(source.contains("data-hemx-revealed-ahead")); //  test
+    assert!(source.contains("data-hemx-revealed-ahead"));
     assert!(source.contains("typeof IntersectionObserver === \"undefined\""));
     assert!(source.contains("rootMargin"));
     assert!(source.contains("addEventListener(\"resize\", () => rebindRevealed(false))"));
     assert!(source.contains("schedule(entry.target, \"revealed\")"));
     assert!(source.contains("window.addEventListener(\"pageshow\", restoreRevealed)"));
-    assert!(source.contains("revealed.delete(el)")); //  test
+    assert!(source.contains("revealed.delete(el)"));
     assert!(source.contains("record.addedNodes.forEach((node) =>"));
     assert!(source.contains("descendantRoots(node).forEach(bindRoot)"));
     assert!(source.contains("const owner = rootOf(node.parentElement)"));
@@ -152,7 +152,7 @@ fn runtime_supports_tiny_delay_and_revealed_scheduling() {
     assert!(source.contains("bindRevealed(owner)"));
     assert!(source.contains(
         "for (const op of batch.ops) applyOp(scope, op);\n    bindPolling(scope);\n    bindRevealed(scope);"
-    )); //  test
+    ));
 }
 
 #[test]
@@ -253,7 +253,6 @@ fn runtime_clicking_submitter_schedules_form_submit() {
 
 #[test]
 fn runtime_supports_drag_drop_params_without_user_js() {
-    // ,
     let source = hemx_js::RUNTIME_JS;
 
     assert!(source.contains("const dragKeys = new WeakMap()"));
@@ -306,7 +305,7 @@ fn runtime_exposes_page_swap_hooks() {
     assert!(source.contains("history.pushState"));
     assert!(source.contains("snapshotPage(root)"));
     assert!(source.contains("restorePage(event.state, root)"));
-    assert!(source.contains("scrollTo(state.scrollX, state.scrollY)")); //  test
+    assert!(source.contains("scrollTo(state.scrollX, state.scrollY)"));
     assert!(source.contains("popstate"));
     assert!(source.contains("x-hemx-title"));
     assert!(source.contains("x-hemx-fingerprint"));
@@ -432,7 +431,6 @@ fn runtime_preflights_batches_before_applying_ops() {
 fn runtime_ships_typescript_definitions() {
     let source = hemx_js::RUNTIME_D_TS;
 
-    assert!(source.contains(""));
     assert!(source.contains("export interface EffectBatch"));
     assert!(source.contains("fingerprint: bigint"));
     assert!(source.contains("export type Effect ="));

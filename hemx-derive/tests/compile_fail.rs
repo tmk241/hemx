@@ -602,7 +602,6 @@ struct Profile {
 
 #[test]
 fn form_struct_accepts_raw_identifier_for_reserved_control_name() {
-    //  test
     let fixture = Fixture::new("hemx-derive-form-raw-identifier-pass");
     fixture.write(
         "Cargo.toml",
@@ -1015,7 +1014,6 @@ pub const MISSING: hemx::CssClass = ui::classes::missing;
 
 #[test]
 fn effect_batch_has_no_parallel_postcard_wire_api() {
-    //  test
     let fixture = Fixture::new("hemx-effect-batch-postcard-api-fail");
     fixture.write(
         "Cargo.toml",

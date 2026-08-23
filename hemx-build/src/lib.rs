@@ -3599,7 +3599,7 @@ mod tests {
                 .count(),
             1,
             "conditional controls with one submitted name are one Rust form field"
-        ); //  test
+        );
         assert!(syms.contains("form_field\tprofile\tlabels\tfalse\ttrue\n"));
 
         let _ = std::fs::remove_dir_all(&base);
@@ -3607,7 +3607,6 @@ mod tests {
 
     #[test]
     fn emits_checked_css_class_tokens_from_templates_and_stylesheets() {
-        // ,
         let base = test_dir("hemx-build-classes-test");
         let templates = base.join("templates");
         let out = base.join("out");
@@ -4557,7 +4556,6 @@ fn main() {{
 
     #[test]
     fn generated_lowering_injects_progressive_form_handle_and_key() {
-        // ,
         let base = test_dir("hemx-build-lowering-test");
         let templates = base.join("templates");
         let out = base.join("out");
@@ -4615,8 +4613,7 @@ fn main() {{
     let html = todo::lower_html(r#"<form data-hemx-handle="create"><input name="title"></form><li data-hemx-slot="row" h-key="7"></li>"#);
     assert!(html.contains(r#"data-hid="#));
     assert!(html.contains(r#"name="__h""#));
-    assert!(html.contains(r#"data-key="7""#)); //  test
-    assert!(!html.contains("h-key"));
+    assert!(html.contains(r#"data-key="7""#));    assert!(!html.contains("h-key"));
 }}
 "###,
         );

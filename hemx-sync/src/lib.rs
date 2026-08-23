@@ -590,7 +590,6 @@ mod tests {
             assert_eq!(error, expected);
             assert_eq!(error.to_string(), message);
         }
-        //  test
     }
 
     #[test]
@@ -725,7 +724,6 @@ mod tests {
             PatchError::ValueTooLong.to_string(),
             "patch string value is too long"
         );
-        //     test
     }
 
     #[test]
@@ -765,7 +763,6 @@ mod tests {
                 "invalid JSON must report {expected}"
             );
         }
-        //    test
     }
 
     #[test]
