@@ -17,10 +17,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-targets --all-features
+      - run: cargo check -p hemx-server-wasm-test --target wasm32-unknown-unknown
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check

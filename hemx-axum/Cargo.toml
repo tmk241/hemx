@@ -16,8 +16,8 @@ path = "src/lib.rs"
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["multipart", "tokio"] }
 futures-util = { version = "0.3", default-features = false }
-hemx-core = { version = "0.2.0", path = "../hemx-core" }
-hemx-js = { version = "0.2.0", path = "../hemx-js" }
+hemx-core = { version = "0.3.0", path = "../hemx-core" }
+hemx-js = { version = "0.3.0", path = "../hemx-js" }
 
 [dev-dependencies]
 scraper = "0.25"

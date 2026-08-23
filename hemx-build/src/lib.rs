@@ -231,10 +231,6 @@ impl AppBuilder {
             resources.generated_rs(self.global_exports).as_bytes(),
         )?;
         write_if_changed(&out_dir.join("hemx.syms"), resources.syms().as_bytes())?;
-        write_if_changed(
-            &out_dir.join("hemx.client.js"),
-            resources.client_bootstrap()?.as_bytes(),
-        )?;
         Ok(())
     }
 }
@@ -268,8 +264,6 @@ struct Resources {
     atoms: BTreeMap<String, Resource>,
     classes: BTreeMap<String, ClassToken>,
     events: BTreeMap<String, EventToken>,
-    client_handlers: BTreeSet<String>,
-    client_modules: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -340,21 +334,6 @@ impl Resources {
                     let canonical = canonical_symbol(root, path, event);
                     self.insert_event(canonical, event.to_owned(), component.clone());
                 }
-            }
-
-            if let Some(handler) = static_attr(&node.attrs, "data-hemx-client") {
-                let Some(handler) = rust_ident(&handler) else {
-                    return Err(invalid_hemx_value(
-                        path,
-                        "data-hemx-client",
-                        &handler,
-                        "expected a Rust handler identifier",
-                    ));
-                };
-                self.client_handlers.insert(handler);
-            }
-            if let Some(module) = static_attr(&node.attrs, "data-hemx-client-module") {
-                self.client_modules.insert(module);
             }
 
             if let Some(name) = static_attr(&node.attrs, "data-hemx-slot") {
@@ -642,7 +621,6 @@ impl Resources {
         out.push_str(&format!("{inner}    pub fn text(self, value: impl ::std::string::ToString) -> ::hemx::advanced::Effect {{ self.slot.text(value) }}\n"));
         out.push_str(&format!("{inner}    pub fn set(self, value: impl ::std::string::ToString) -> ::hemx::advanced::Effect {{ self.slot.text(value) }}\n"));
         out.push_str(&format!("{inner}}}\n"));
-        out.push_str(&format!("{inner}#[cfg(not(target_arch = \"wasm32\"))]\n"));
         out.push_str(&format!("{inner}impl<T> SlotTarget<T, ()> {{\n"));
         out.push_str(&format!("{inner}    pub fn put(self, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ super::put(self.slot, view) }}\n"));
         out.push_str(&format!("{inner}    pub fn replace(self, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ super::put(self.slot, view) }}\n"));
@@ -654,7 +632,6 @@ impl Resources {
             .filter(|res| components.contains(&res.ident) && Some(res.ident.as_str()) != component)
         {
             let child = &res.ident;
-            out.push_str(&format!("{inner}#[cfg(not(target_arch = \"wasm32\"))]\n"));
             out.push_str(&format!(
                 "{inner}impl<T> SlotTarget<T, {child_prefix}{child}::Component> {{\n"
             ));
@@ -683,7 +660,6 @@ impl Resources {
         out.push_str(&format!("{inner}    pub fn move_to_end(self, key: K) -> ::hemx::advanced::Effect {{ self.slot.move_to_end(key) }}\n"));
         out.push_str(&format!("{inner}    pub fn remove_key(self, key: K) -> ::hemx::advanced::Effect {{ self.slot.remove(key) }}\n"));
         out.push_str(&format!("{inner}}}\n"));
-        out.push_str(&format!("{inner}#[cfg(not(target_arch = \"wasm32\"))]\n"));
         out.push_str(&format!(
             "{inner}impl<T> KeyedSlotTarget<::std::string::String, T, ()> {{\n"
         ));
@@ -703,7 +679,6 @@ impl Resources {
             .filter(|res| components.contains(&res.ident) && Some(res.ident.as_str()) != component)
         {
             let child = &res.ident;
-            out.push_str(&format!("{inner}#[cfg(not(target_arch = \"wasm32\"))]\n"));
             out.push_str(&format!(
                 "{inner}impl<T> KeyedSlotTarget<::std::string::String, T, {child_prefix}{child}::Component> {{\n"
             ));
@@ -946,7 +921,6 @@ impl Resources {
             "{pad}    ::hemx::__private::html_trusted(lower(html))\n"
         ));
         out.push_str(&format!("{pad}}}\n\n"));
-        out.push_str(&format!("{pad}#[cfg(not(target_arch = \"wasm32\"))]\n"));
         out.push_str(&format!("{pad}#[doc(hidden)]\n"));
         out.push_str(&format!(
             "{pad}pub fn render(view: &impl ::hemplate::Hemplate) -> ::hemx::Html {{\n"
@@ -960,17 +934,14 @@ impl Resources {
         ));
         out.push_str(&format!("{pad}}}\n\n"));
         out.push_str(&format!(
-            "{pad}#[cfg(not(target_arch = \"wasm32\"))]\n{pad}pub fn page(view: &impl ::hemplate::Hemplate) -> ::hemx::Html {{ render(view) }}\n\n"
+            "{pad}pub fn page(view: &impl ::hemplate::Hemplate) -> ::hemx::Html {{ render(view) }}\n\n"
         ));
-        out.push_str(&format!("{pad}#[cfg(not(target_arch = \"wasm32\"))]\n"));
         out.push_str(&format!("{pad}#[doc(hidden)]\n"));
         out.push_str(&format!("{pad}pub fn render_html(view: &impl ::hemplate::Hemplate) -> ::hemx::Html {{ render(view) }}\n\n"));
-        out.push_str(&format!("{pad}#[cfg(not(target_arch = \"wasm32\"))]\n"));
         out.push_str(&format!("{pad}#[doc(hidden)]\n"));
         out.push_str(&format!("{pad}pub fn put<T>(slot: ::hemx::advanced::Slot<T>, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{\n"));
         out.push_str(&format!("{pad}    slot.html(render(view))\n"));
         out.push_str(&format!("{pad}}}\n\n"));
-        out.push_str(&format!("{pad}#[cfg(not(target_arch = \"wasm32\"))]\n"));
         out.push_str(&format!("{pad}#[doc(hidden)]\n"));
         out.push_str(&format!("{pad}pub fn append<K, T>(slot: ::hemx::advanced::KeyedSlot<K, T>, key: K, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect\n"));
         out.push_str(&format!("{pad}where\n"));
@@ -978,7 +949,6 @@ impl Resources {
         out.push_str(&format!("{pad}{{\n"));
         out.push_str(&format!("{pad}    slot.append_html(key, render(view))\n"));
         out.push_str(&format!("{pad}}}\n\n"));
-        out.push_str(&format!("{pad}#[cfg(not(target_arch = \"wasm32\"))]\n"));
         out.push_str(&format!("{pad}#[doc(hidden)]\n"));
         out.push_str(&format!("{pad}pub fn prepend<K, T>(slot: ::hemx::advanced::KeyedSlot<K, T>, key: K, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect\n"));
         out.push_str(&format!("{pad}where\n"));
@@ -986,7 +956,6 @@ impl Resources {
         out.push_str(&format!("{pad}{{\n"));
         out.push_str(&format!("{pad}    slot.prepend_html(key, render(view))\n"));
         out.push_str(&format!("{pad}}}\n\n"));
-        out.push_str(&format!("{pad}#[cfg(not(target_arch = \"wasm32\"))]\n"));
         out.push_str(&format!("{pad}#[doc(hidden)]\n"));
         out.push_str(&format!("{pad}pub fn replace<K, T>(slot: ::hemx::advanced::KeyedSlot<K, T>, key: K, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect\n"));
         out.push_str(&format!("{pad}where\n"));
@@ -1156,50 +1125,6 @@ fn __hemx_attr(tag: &str, attr: &str) -> Option<::std::string::String> {
         }
         components.sort();
         components
-    }
-
-    fn client_bootstrap(&self) -> io::Result<String> {
-        if self.client_handlers.is_empty() {
-            return Ok(String::new());
-        }
-        let module = match self.client_modules.len() {
-            1 => self.client_modules.iter().next().unwrap(),
-            0 => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "client-local handlers require one data-hemx-client-module on a hemx root",
-                ));
-            }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "client-local handlers must share one data-hemx-client-module per generated application",
-                ));
-            }
-        };
-        let exports = self
-            .client_handlers
-            .iter()
-            .map(|handler| format!("__hemx_client_{handler}"))
-            .collect::<Vec<_>>();
-        let mut out = format!(
-            "import init, {{ {} }} from {};\nawait init();\n",
-            exports.join(", "),
-            serde_json::to_string(module).expect("serialize client module")
-        );
-        for handler in &self.client_handlers {
-            out.push_str(&format!(
-                "window.hemx.registerClientHandler({}, __hemx_client_{});\n",
-                serde_json::to_string(handler).expect("serialize client handler"),
-                handler
-            ));
-        }
-        let fingerprint = hemx_core::BuildFingerprint::from_parts(&self.fingerprint_parts()).0;
-        out.push_str(&format!(
-            "document.querySelectorAll('[data-hemx-root]').forEach((root) => {{ root.setAttribute('data-hemx-build', '{}'); root.setAttribute('data-hemx-client-ready', ''); }});\n",
-            fingerprint
-        ));
-        Ok(out)
     }
 
     fn syms(&self) -> String {
@@ -1607,12 +1532,6 @@ fn known_hemx_attr(name: &str) -> bool {
             | "data-hemx-atom"
             | "data-hemx-key"
             | "data-hemx-on"
-            | "data-hemx-client"
-            | "data-hemx-client-event"
-            | "data-hemx-client-fallback"
-            | "data-hemx-client-module"
-            | "data-hemx-client-policy"
-            | "data-hemx-client-state-version"
             | "data-hemx-pending-class"
             | "data-hemx-indicator"
             | "data-hemx-confirm"
@@ -1655,52 +1574,6 @@ fn reject_invalid_hemx_attr_values(path: &Path, attrs: &[SurfaceAttribute]) -> i
                     &attr.name,
                     value,
                     "expected `push`, `replace`, or empty for the default push behavior",
-                ));
-            }
-            "data-hemx-client" if value.trim().is_empty() => {
-                return Err(invalid_hemx_value(
-                    path,
-                    &attr.name,
-                    value,
-                    "expected a non-empty client handler name",
-                ));
-            }
-            "data-hemx-client-policy" if !matches!(value.trim(), "latest" | "drop") => {
-                return Err(invalid_hemx_value(
-                    path,
-                    &attr.name,
-                    value,
-                    "expected `latest` or `drop`",
-                ));
-            }
-            "data-hemx-client-module" if !valid_client_module(value) => {
-                return Err(invalid_hemx_value(
-                    path,
-                    &attr.name,
-                    value,
-                    "expected a same-origin module specifier beginning with `/`, `./`, or `../`",
-                ));
-            }
-            "data-hemx-client-event" if !valid_event_list(value) => {
-                return Err(invalid_hemx_value(
-                    path,
-                    &attr.name,
-                    value,
-                    "expected a runtime-supported event",
-                ));
-            }
-            "data-hemx-client-state-version"
-                if value
-                    .parse::<u32>()
-                    .ok()
-                    .filter(|version| *version > 0)
-                    .is_none() =>
-            {
-                return Err(invalid_hemx_value(
-                    path,
-                    &attr.name,
-                    value,
-                    "expected a positive client state ABI version",
                 ));
             }
             "data-hemx-on" if !valid_event_list(value) => {
@@ -1789,13 +1662,6 @@ fn reject_invalid_hemx_attr_placement(
             "expected a container around descendant links/forms; use `data-hemx-nav` on anchors or `data-hemx-handle` on forms",
         ));
     }
-    if has_attr(attrs, "data-hemx-client-module") && !has_attr(attrs, "data-hemx-root") {
-        return Err(invalid_hemx_placement(
-            path,
-            "data-hemx-client-module",
-            "expected placement on the same element as `data-hemx-root`",
-        ));
-    }
     if has_attr(attrs, "data-hemx-sse") && !has_attr(attrs, "data-hemx-root") {
         return Err(invalid_hemx_placement(
             path,
@@ -1829,14 +1695,6 @@ fn invalid_hemx_placement(path: &Path, attr: &str, expectation: &str) -> io::Err
 
 fn valid_policy(value: &str) -> bool {
     matches!(value.trim(), "latest" | "queue" | "drop" | "parallel")
-}
-
-fn valid_client_module(value: &str) -> bool {
-    let value = value.trim();
-    !value.is_empty()
-        && !value.starts_with("//")
-        && !value.contains(':')
-        && (value.starts_with('/') || value.starts_with("./") || value.starts_with("../"))
 }
 
 fn valid_event_list(value: &str) -> bool {
@@ -2657,7 +2515,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_contract_fingerprint_and_client_bootstrap_are_deterministic() {
+    fn generated_contract_fingerprint_is_deterministic() {
         let resource = |symbol: &str, component: &str, id| Resource {
             symbol: symbol.into(),
             ident: symbol.into(),
@@ -2797,12 +2655,12 @@ mod tests {
         let canonical_syms = resources.syms();
         assert_eq!(
             stable_id("generated-rs", &canonical_generated),
-            2_620_423_950,
+            262_445_078,
             "canonical generated Rust changed"
         );
         assert_eq!(
             stable_id("generated-rs-global", &canonical_globals),
-            2_559_847_213,
+            3_211_924_671,
             "canonical global-export Rust changed"
         );
         assert_eq!(
@@ -2810,33 +2668,10 @@ mod tests {
             984_222_700,
             "canonical symbol manifest changed"
         );
-
-        assert_eq!(Resources::default().client_bootstrap().unwrap(), "");
-        resources
-            .client_handlers
-            .extend(["save".into(), "toggle".into()]);
-        assert_eq!(
-            resources.client_bootstrap().unwrap_err().to_string(),
-            "client-local handlers require one data-hemx-client-module on a hemx root"
-        );
-        resources.client_modules.insert("/app.wasm".into());
-        let bootstrap = resources.client_bootstrap().unwrap();
-        assert!(bootstrap.starts_with(
-            "import init, { __hemx_client_save, __hemx_client_toggle } from \"/app.wasm\";\nawait init();\n"
-        ));
-        assert!(
-            bootstrap.contains("window.hemx.registerClientHandler(\"save\", __hemx_client_save);")
-        );
-        assert!(bootstrap.contains("data-hemx-client-ready"));
-        resources.client_modules.insert("/other.wasm".into());
-        assert_eq!(
-            resources.client_bootstrap().unwrap_err().to_string(),
-            "client-local handlers must share one data-hemx-client-module per generated application"
-        );
     }
 
     #[test]
-    fn app_builder_propagates_output_and_client_contract_errors_without_panicking() {
+    fn app_builder_propagates_output_and_contract_errors_without_panicking() {
         let root = std::env::temp_dir().join(format!(
             "hemx-build-error-{}-{}",
             std::process::id(),
@@ -2856,49 +2691,10 @@ mod tests {
         assert!(result.unwrap().is_err());
 
         std::fs::remove_dir_all(out.join("hemx.syms")).unwrap();
-        std::fs::create_dir_all(out.join("hemx.client.js")).unwrap();
-        let result = std::panic::catch_unwind(|| app().out_dir(&out).run());
-        assert!(result.is_ok(), "client output errors must not panic");
-        assert!(result.unwrap().is_err());
 
         let templates = root.join("templates");
         let invalid_out = root.join("invalid-out");
         std::fs::create_dir_all(&templates).unwrap();
-        std::fs::write(
-            templates.join("client.heml"),
-            "<button data-hemx-client=\"save\">Save</button>",
-        )
-        .unwrap();
-        let result =
-            std::panic::catch_unwind(|| app().template_dir(&templates).out_dir(&invalid_out).run());
-        assert!(result.is_ok(), "invalid client contracts must not panic");
-        assert_eq!(
-            result.unwrap().unwrap_err().to_string(),
-            "client-local handlers require one data-hemx-client-module on a hemx root"
-        );
-
-        let invalid_handler = templates.join("invalid_handler.heml");
-        std::fs::write(
-            &invalid_handler,
-            r#"<main data-hemx-root="app" data-hemx-client-module="/app.js"><button data-hemx-client="save-item">Save</button></main>"#,
-        )
-        .unwrap();
-        std::fs::remove_file(templates.join("client.heml")).unwrap();
-        let error = app()
-            .template_dir(&templates)
-            .out_dir(&invalid_out)
-            .run()
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "{}: invalid data-hemx-client value `save-item`; expected a Rust handler identifier",
-                invalid_handler.display()
-            )
-        );
-
-        std::fs::remove_file(invalid_handler).unwrap();
         std::fs::write(
             templates.join("invalid_param.heml"),
             r#"<button data-hemx-handle="save" data-123="value">Save</button>"#,
@@ -4166,42 +3962,6 @@ fn main() {{
                 "latest",
             ),
             (
-                "empty-client",
-                r#"<button data-hemx-client="">Save</button>"#,
-                "data-hemx-client",
-                "non-empty",
-            ),
-            (
-                "client-module-scheme",
-                r#"<main data-hemx-root="app" data-hemx-client-module="https://example.com/app.js"></main>"#,
-                "data-hemx-client-module",
-                "same-origin",
-            ),
-            (
-                "client-event",
-                r#"<button data-hemx-client="save" data-hemx-client-event="blur">Save</button>"#,
-                "data-hemx-client-event",
-                "runtime-supported",
-            ),
-            (
-                "client-version-zero",
-                r#"<button data-hemx-client="save" data-hemx-client-state-version="0">Save</button>"#,
-                "data-hemx-client-state-version",
-                "positive",
-            ),
-            (
-                "client-version-invalid",
-                r#"<button data-hemx-client="save" data-hemx-client-state-version="one">Save</button>"#,
-                "data-hemx-client-state-version",
-                "positive",
-            ),
-            (
-                "client-policy-invalid",
-                r#"<button data-hemx-client="save" data-hemx-client-policy="queue">Save</button>"#,
-                "data-hemx-client-policy",
-                "latest",
-            ),
-            (
                 "events-mixed",
                 r#"<button data-hemx-handle="save" data-hemx-on="click blur">Save</button>"#,
                 "data-hemx-on",
@@ -4338,15 +4098,6 @@ fn main() {{
                 "data-hemx-history" => {
                     "expected `push`, `replace`, or empty for the default push behavior"
                 }
-                "data-hemx-client" => "expected a non-empty client handler name",
-                "data-hemx-client-policy" => "expected `latest` or `drop`",
-                "data-hemx-client-module" => {
-                    "expected a same-origin module specifier beginning with `/`, `./`, or `../`"
-                }
-                "data-hemx-client-event" => "expected a runtime-supported event",
-                "data-hemx-client-state-version" => {
-                    "expected a positive client state ABI version"
-                }
                 "data-hemx-revealed-ahead" => "expected a non-negative number of viewports",
                 "data-hemx-on" => "expected runtime-supported events: `click`, `submit`, `input`, `change`, `keydown`, `dragstart`, `dragover`, or `drop`",
                 "data-hemx-confirm" => "expected a non-empty confirmation message",
@@ -4379,19 +4130,6 @@ fn main() {{
         }
         for invalid in ["", "newest", "latest queue", "LATEST"] {
             assert!(!valid_policy(invalid), "accepted policy {invalid:?}");
-        }
-
-        for valid in ["/app.js", " ./app.js ", "../app.js"] {
-            assert!(valid_client_module(valid), "rejected module {valid:?}");
-        }
-        for invalid in [
-            "",
-            " ",
-            "//cdn/app.js",
-            "https://example.com/app.js",
-            "app.js",
-        ] {
-            assert!(!valid_client_module(invalid), "accepted module {invalid:?}");
         }
 
         for valid in [
@@ -4431,9 +4169,8 @@ fn main() {{
         }
 
         let valid_source = r#"
-            <main data-hemx-root="app" data-hemx-client-module="/app.js" data-hemx-sse="/events" data-hemx-ws="/room/socket">
+            <main data-hemx-root="app" data-hemx-sse="/events" data-hemx-ws="/room/socket">
                 <button data-hemx-handle="save" data-hemx-policy="latest" data-hemx-on="click change" data-hemx-confirm="Save?" data-hemx-delay="250ms" data-hemx-throttle="1s">Save</button>
-                <button data-hemx-client="save" data-hemx-client-event="click" data-hemx-client-policy="drop" data-hemx-client-state-version="1">Client</button>
                 <form method="get" action="/search" data-hemx-history="replace"><input name="q"></form>
             </main>
         "#;
@@ -4481,12 +4218,6 @@ fn main() {{
                 "expected a container around descendant links/forms; use `data-hemx-nav` on anchors or `data-hemx-handle` on forms",
             ),
             (
-                "client-module-child",
-                r#"<section data-hemx-root="app"><div data-hemx-client-module="/app.js"></div></section>"#,
-                "data-hemx-client-module",
-                "expected placement on the same element as `data-hemx-root`",
-            ),
-            (
                 "sse-child",
                 r#"<section data-hemx-root="feed"><div data-hemx-sse="/events"></div></section>"#,
                 "data-hemx-sse",
@@ -4529,10 +4260,6 @@ fn main() {{
             (
                 "boost-container",
                 r#"<nav data-hemx-boost=""><a href="/docs">Docs</a></nav>"#,
-            ),
-            (
-                "client-module-root",
-                r#"<main data-hemx-root="app" data-hemx-client-module="/app.js"></main>"#,
             ),
             (
                 "sse-root",

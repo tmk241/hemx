@@ -44,16 +44,6 @@ export interface AtomSnapshot {
   bytes: Uint8Array;
 }
 
-export type ClientHandler = (
-  eventVersion: number,
-  eventKind: string,
-  eventValue: string | undefined,
-  eventChecked: boolean | undefined,
-  eventKey: string | undefined,
-  stateVersion: number,
-  encodedState: string,
-) => Uint8Array | Promise<Uint8Array>;
-
 export interface HemxRuntime {
   readonly runtimeAbiVersion: number;
   roots(): Element[];
@@ -63,7 +53,6 @@ export interface HemxRuntime {
   decodeBatch(buffer: ArrayBuffer): EffectBatch;
   atomValue(root: Element | ParentNode | null | undefined, id: number): Uint8Array | undefined;
   decodeAtomState(encoded: string): AtomSnapshot[];
-  registerClientHandler(name: string, handler: ClientHandler): ClientHandler | undefined;
 }
 
 declare global {

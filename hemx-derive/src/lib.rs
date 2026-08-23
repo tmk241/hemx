@@ -12,10 +12,14 @@ use syn::{
 #[proc_macro_attribute]
 pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
     let placement = attr.to_string();
-    let placement = match handler_placement(&placement) {
-        Ok(placement) => placement,
-        Err(error) => return error.into_compile_error().into(),
-    };
+    if !placement.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "unsupported hemx handler placement; expected #[hemx::handler]",
+        )
+        .into_compile_error()
+        .into();
+    }
     let function = parse_macro_input!(item as ItemFn);
     let name = function.sig.ident.to_string();
 
@@ -72,70 +76,7 @@ pub fn handler(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into();
     }
 
-    expand_handler_function(function, placement).into()
-}
-
-fn expand_handler_function(
-    function: ItemFn,
-    placement: HandlerPlacement,
-) -> proc_macro2::TokenStream {
-    if placement == HandlerPlacement::Server {
-        return quote!(#function);
-    }
-    let has_inputs = match client_handler_has_inputs(&function) {
-        Ok(has_inputs) => has_inputs,
-        Err(error) => {
-            let message = error.to_string();
-            return quote!(
-                #function
-                compile_error!(#message);
-            );
-        }
-    };
-
-    let function_name = &function.sig.ident;
-    let export_name = format_ident!("__hemx_client_{function_name}");
-    let export_module = format_ident!("__hemx_client_export_{function_name}");
-    let invoke_handler = if has_inputs {
-        quote!(super::#function_name(event, state))
-    } else {
-        quote!(super::#function_name())
-    };
-    quote!(
-        #function
-
-        #[cfg(target_arch = "wasm32")]
-        mod #export_module {
-            use ::hemx::wasm as wasm_bindgen;
-
-            #[::hemx::wasm::wasm_bindgen(js_name = #export_name)]
-            #[allow(clippy::too_many_arguments)]
-            pub fn invoke(
-                event_version: u32,
-                event_kind: ::std::string::String,
-                event_value: ::std::option::Option<::std::string::String>,
-                event_checked: ::std::option::Option<bool>,
-                event_key: ::std::option::Option<::std::string::String>,
-                state_version: u32,
-                encoded_state: ::std::string::String,
-            ) -> ::std::result::Result<::std::vec::Vec<u8>, ::hemx::wasm::JsValue> {
-                let (event, state) = ::hemx::wasm::decode_client_inputs(
-                    event_version,
-                    event_kind,
-                    event_value,
-                    event_checked,
-                    event_key,
-                    state_version,
-                    encoded_state,
-                )
-                .map_err(|error| ::hemx::wasm::JsValue::from_str(&error))?;
-                Ok(::hemx::wasm::encode_handler_effect(
-                    #invoke_handler,
-                    crate::ui::BUILD_FINGERPRINT,
-                ))
-            }
-        }
-    )
+    quote!(#function).into()
 }
 
 #[proc_macro_attribute]
@@ -333,43 +274,6 @@ fn form_impl_generics(form_struct: &ItemStruct) -> syn::Generics {
             .push(parse_quote!(#ty: ::hemx::FormValue));
     }
     generics
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HandlerPlacement {
-    Server,
-    Client,
-}
-
-fn handler_placement(placement: &str) -> syn::Result<HandlerPlacement> {
-    match placement {
-        "" => Ok(HandlerPlacement::Server),
-        "client" => Ok(HandlerPlacement::Client),
-        _ => Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "unsupported hemx handler placement; expected #[hemx::handler] or #[hemx::handler(client)]",
-        )),
-    }
-}
-
-fn client_handler_has_inputs(function: &ItemFn) -> syn::Result<bool> {
-    let input_count = function.sig.inputs.len();
-    if matches!(input_count, 0 | 2)
-        && function.sig.asyncness.is_none()
-        && function.sig.unsafety.is_none()
-        && function.sig.constness.is_none()
-        && function.sig.generics.params.is_empty()
-    {
-        Ok(input_count == 2)
-    } else {
-        Err(syn::Error::new_spanned(
-            &function.sig,
-            format!(
-                "client-local hemx handler `{}` must be safe, synchronous, non-generic, and accept either no parameters or `(hemx::wasm::ClientEvent, hemx::wasm::ClientState)`",
-                function.sig.ident
-            ),
-        ))
-    }
 }
 
 fn handler_form_model_type(function: &ItemFn) -> Option<Type> {
@@ -1011,90 +915,18 @@ fn compile_error(message: &str) -> TokenStream {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_app_registry_helper, add_component_register_helper, client_handler_has_inputs,
-        component_contract_errors, component_handler_names, component_registration_call,
-        expand_handler_function, form_contract_errors, form_decode_fields, form_fields,
-        form_impl_generics, form_model_type, form_resource_id, generic_inner_type, handle_params,
-        handle_requires_form, handler_arg_names, handler_form_model_type, handler_placement,
-        handler_syms_path, has_form_param, has_non_unit_return, is_type_named,
-        join_contract_errors, missing_component_handlers, missing_form_generated_files_message,
-        missing_handle_params, missing_handler_generated_files_message, parser_type,
-        returns_result, rust_ident, symbol_component, syms_components, syms_contains_handle,
-        syms_handles, ComponentHandler, HandlerPlacement,
+        add_app_registry_helper, add_component_register_helper, component_contract_errors,
+        component_handler_names, component_registration_call, form_contract_errors,
+        form_decode_fields, form_fields, form_impl_generics, form_model_type, form_resource_id,
+        generic_inner_type, handle_params, handle_requires_form, handler_arg_names,
+        handler_form_model_type, handler_syms_path, has_form_param, has_non_unit_return,
+        is_type_named, join_contract_errors, missing_component_handlers,
+        missing_form_generated_files_message, missing_handle_params,
+        missing_handler_generated_files_message, parser_type, returns_result, rust_ident,
+        symbol_component, syms_components, syms_contains_handle, syms_handles, ComponentHandler,
     };
     use quote::{quote, ToTokens};
     use syn::{parse_quote, ItemFn, Type};
-
-    #[test]
-    fn handler_attribute_parses_server_and_client_modes_exactly() {
-        assert_eq!(handler_placement("").unwrap(), HandlerPlacement::Server);
-        assert_eq!(
-            handler_placement("client").unwrap(),
-            HandlerPlacement::Client
-        );
-        for invalid in ["server", " client", "client ", "CLIENT"] {
-            assert_eq!(
-                handler_placement(invalid).unwrap_err().to_string(),
-                "unsupported hemx handler placement; expected #[hemx::handler] or #[hemx::handler(client)]"
-            );
-        }
-
-        let no_inputs: ItemFn = parse_quote!(
-            fn save() {}
-        );
-        let two_inputs: ItemFn = parse_quote!(
-            fn save(event: Event, state: State) {}
-        );
-        assert!(!client_handler_has_inputs(&no_inputs).unwrap());
-        assert!(client_handler_has_inputs(&two_inputs).unwrap());
-
-        let server =
-            expand_handler_function(no_inputs.clone(), HandlerPlacement::Server).to_string();
-        assert_eq!(
-            server,
-            quote!(
-                fn save() {}
-            )
-            .to_string()
-        );
-        let no_input_client =
-            expand_handler_function(no_inputs.clone(), HandlerPlacement::Client).to_string();
-        assert!(no_input_client.contains("super :: save ()"));
-        assert!(!no_input_client.contains("super :: save (event , state)"));
-        let input_client =
-            expand_handler_function(two_inputs.clone(), HandlerPlacement::Client).to_string();
-        assert!(input_client.contains("super :: save (event , state)"));
-        assert!(!input_client.contains("super :: save ()"));
-
-        for invalid in [
-            parse_quote!(
-                fn save(event: Event) {}
-            ),
-            parse_quote!(
-                fn save(a: A, b: B, c: C) {}
-            ),
-            parse_quote!(
-                async fn save() {}
-            ),
-            parse_quote!(
-                unsafe fn save() {}
-            ),
-            parse_quote!(
-                const fn save() {}
-            ),
-            parse_quote!(
-                fn save<T>() {}
-            ),
-        ] {
-            assert_eq!(
-                client_handler_has_inputs(&invalid).unwrap_err().to_string(),
-                "client-local hemx handler `save` must be safe, synchronous, non-generic, and accept either no parameters or `(hemx::wasm::ClientEvent, hemx::wasm::ClientState)`"
-            );
-            let expanded = expand_handler_function(invalid, HandlerPlacement::Client).to_string();
-            assert!(expanded.contains("compile_error !"));
-            assert!(expanded.contains("client-local hemx handler"));
-        }
-    }
 
     #[test]
     fn generated_file_and_form_helpers_preserve_exact_contracts() {

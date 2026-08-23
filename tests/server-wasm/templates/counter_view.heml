@@ -1,0 +1,1 @@
+<strong>Count: {+ self.count +}</strong>

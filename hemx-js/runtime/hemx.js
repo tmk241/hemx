@@ -19,9 +19,6 @@
   const webSockets = new WeakMap();
   const atomStores = new WeakMap();
   const dragKeys = new WeakMap();
-  let currentOperationId = null;
-  const clientHandlers = new Map();
-  const clientRuns = new WeakMap();
   const activeRequests = new Set();
   const REQUEST_TIMEOUT_MS = 10_000;
 
@@ -249,57 +246,6 @@
     });
   }
 
-  async function runClient(el, event) {
-    const name = el.getAttribute("data-hemx-client");
-    const root = rootOf(el);
-    const policy = el.getAttribute("data-hemx-client-policy") || "latest";
-    const run = { root, generation: (clientRuns.get(root)?.generation || 0) + 1 };
-    if (policy === "drop" && clientRuns.has(root)) return;
-    clientRuns.set(root, run);
-    const active = () => clientRuns.get(root) === run && root.isConnected;
-    const handler = clientHandlers.get(name);
-    showError(el, null);
-    showPending(el, true);
-    try {
-      if (!handler) throw new Error(`unknown client-local hemx handler: ${name}`);
-      const stateVersion = Number(root.getAttribute("data-hemx-client-state-version") || "1");
-      const operationId = crypto.randomUUID();
-      const wire = await handler(
-        1,
-        event.type,
-        dragKeys.get(root) || el.getAttribute("data-card-id") || ("value" in el ? String(el.value) : undefined),
-        "checked" in el ? Boolean(el.checked) : undefined,
-        event.key || undefined,
-        stateVersion,
-        root.getAttribute(STATE) || "",
-      );
-      if (!(wire instanceof Uint8Array)) throw new Error(`client-local hemx handler ${name} returned an invalid effect batch`);
-      if (!active()) return;
-      currentOperationId = operationId;
-      try {
-        applyBatch(wire, root);
-      } finally {
-        currentOperationId = null;
-      }
-      if (name === "reorder_card") {
-        const key = dragKeys.get(root) || el.getAttribute("data-card-id");
-        const moved = key ? firstElement(root, (node) => node.getAttribute("data-key") === key) : null;
-        const focus = moved && (firstElement(moved, (node) => node.tagName === "BUTTON") || moved);
-        if (focus && typeof focus.focus === "function") focus.focus();
-        if (matchMedia("(prefers-reduced-motion: reduce)").matches) root.setAttribute("data-hemx-reduced-motion", "");
-        else root.removeAttribute("data-hemx-reduced-motion");
-      }
-    } catch (error) {
-      if (!active()) return;
-      const fallback = el.hasAttribute("data-hemx-client-fallback");
-      showError(el, error);
-      emit(root, "hemx:client-error", { handler: name, message: String(error), fallback });
-      if (fallback) await send(el, event.type, el);
-    } finally {
-      if (clientRuns.get(root) === run) clientRuns.delete(root);
-      if (el.isConnected) showPending(el, false);
-    }
-  }
 
   async function send(el, eventName, source = el) {
     if (el.getAttribute("data-hemx-confirm") && !confirm(el.getAttribute("data-hemx-confirm"))) return;
@@ -530,19 +476,7 @@
         if (op.title) document.title = op.title;
       }
     } else if (op.kind === "emit") {
-      let payload = op.payload;
-      if (currentOperationId && op.name === "hemx:sync-patch") {
-        const event = JSON.parse(payload);
-        const patch = event && Object.getPrototypeOf(event) === Object.prototype && "patch" in event
-          ? event.patch
-          : event;
-        if (patch.idempotencyKey !== "$hemx-interaction" || patch.operationId !== "$hemx-interaction") {
-          throw new Error("hemx sync patch is missing its interaction identity");
-        }
-        patch.idempotencyKey = currentOperationId;
-        patch.operationId = currentOperationId;
-        payload = JSON.stringify(event);
-      }
+      const payload = op.payload;
       handleRuntimeEvent(scope, op.name, payload);
       emit(scope, op.name, payload);
     }
@@ -772,10 +706,6 @@
   function bindRoot(root) {
     ["click", "submit", "input", "change", "keydown", "dragstart", "dragover", "drop"].forEach((name) => {
       root.addEventListener(name, (event) => {
-        if (name === "keydown") {
-          const direct = closestInRoot(event.target, root, (el) => el.hasAttribute("data-hemx-client"));
-          if (direct && !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
-        }
         if (name === "dragstart") {
           const item = closestInRoot(event.target, root, (el) => el.hasAttribute("data-key"));
           if (item) {
@@ -800,18 +730,9 @@
         }
         if (name === "click") {
           const direct = closestInRoot(event.target, root, (el) => el.hasAttribute(HID));
-          const active = direct || closestInRoot(event.target, root, (el) => el.hasAttribute("data-hemx-client"));
-          if (active && handlesEvent(active, "click")) {
+          if (direct && handlesEvent(direct, "click")) {
             event.preventDefault();
-            if (active.hasAttribute("data-hemx-client")) {
-              runClient(active, event).catch((error) => emit(root, "hemx:client-error", {
-                handler: active.getAttribute("data-hemx-client"),
-                message: String(error),
-                fallback: false,
-              }));
-            } else {
-              schedule(active, name);
-            }
+            schedule(direct, name);
             return;
           }
         }
@@ -829,21 +750,13 @@
           }
         }
         let el = closestInRoot(event.target, root, (node) =>
-          node.hasAttribute(HID) || node.hasAttribute("data-hemx-client") ||
+          node.hasAttribute(HID) ||
           (node.tagName === "FORM" && (pageFormHistoryMode(event.submitter || node, node) || boostRoot(node)))
         );
         if (name === "submit" && !el && event.target && event.target.tagName === "FORM" && (formHandleId(event.target) || pageFormHistoryMode(event.submitter || event.target, event.target))) el = event.target;
         if (!el || !handlesEvent(el, name)) return;
         event.preventDefault();
-        if (el.hasAttribute("data-hemx-client")) {
-          runClient(el, event).catch((error) => emit(root, "hemx:client-error", {
-            handler: el.getAttribute("data-hemx-client"),
-            message: String(error),
-            fallback: false,
-          }));
-        } else {
-          schedule(el, name, event.submitter || el);
-        }
+        schedule(el, name, event.submitter || el);
       });
     });
     bindPolling(root);
@@ -1164,7 +1077,6 @@
   }
 
   function cleanupRemovedRoot(root) {
-    clientRuns.delete(root);
     const source = sseSources.get(root);
     if (source) source.close();
     sseSources.delete(root);
@@ -1266,12 +1178,6 @@
     decodeBatch,
     atomValue,
     decodeAtomState,
-    registerClientHandler(name, handler) {
-      if (!name || typeof handler !== "function") throw new Error("client handler registration requires a name and function");
-      const previous = clientHandlers.get(name);
-      clientHandlers.set(name, handler);
-      return previous;
-    },
   });
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);

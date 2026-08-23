@@ -338,6 +338,45 @@ fn known() {}
 }
 
 #[test]
+fn handler_macro_rejects_client_placement() {
+    let fixture = Fixture::new("hemx-derive-handler-client-placement-fail");
+    fixture.write(
+        "Cargo.toml",
+        &format!(
+            r#"[package]
+name = "hemx-derive-handler-client-placement-fail"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+hemx = {{ path = {:?} }}
+"#,
+            repo_path("hemx")
+        ),
+    );
+    fixture.write(
+        "src/lib.rs",
+        r#"#[hemx::handler(client)]
+fn save() -> impl hemx::IntoEffect {
+    hemx::advanced::EffectBatch::default()
+}
+"#,
+    );
+
+    let output = check_fixture(&fixture);
+
+    assert!(!output.status.success(), "fixture unexpectedly compiled");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsupported hemx handler placement; expected #[hemx::handler]"),
+        "missing client-placement diagnostic in stderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn handler_macro_reports_missing_syms() {
     let fixture = Fixture::new("hemx-derive-handler-syms-fail");
     fixture.write(

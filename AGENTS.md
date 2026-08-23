@@ -9,8 +9,8 @@ sources consistent.
 ## Workspace layout
 
 The main application path uses `hemx`, `hemx-build`, and `hemx-axum` on top of
-`hemx-core` and `hemx-derive`. Browser and deployment concerns are isolated in
-`hemx-js`, `hemx-wasm`, `hemx-host`, and the optional sync packages.
+`hemx-core` and `hemx-derive`. Browser runtime concerns are isolated in
+`hemx-js`.
 
 Keep behavior in the package that owns it. Core effect and protocol types belong
 in `hemx-core`; framework-specific HTTP behavior belongs in `hemx-axum`.
@@ -24,6 +24,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
 cargo deny check licenses sources
+cargo check -p hemx-server-wasm-test --target wasm32-unknown-unknown
 ```
 
 Changes to publishable packages require an archive-based `cargo package` check.
@@ -33,7 +34,7 @@ Changes to publishable packages require an archive-based `cargo package` check.
 - Keep generated APIs typed; avoid stringly typed target and event construction.
 - Preserve root-scoped effect application and fail closed on incompatible builds.
 - Keep routing, persistence, authentication, styling, and domain state outside core.
-- Put custom browser behavior behind explicit leaf-island or host-capability boundaries.
+- Put custom browser behavior behind explicit leaf-island boundaries.
 - Add or update a focused test for behavior changes and regressions.
 - Keep diagnostics actionable and update public docs when contracts change.
 

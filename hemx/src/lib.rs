@@ -3,9 +3,7 @@
 //! Most application code should depend on this crate, use the proc-macros from
 //! here, and import generated resources through `#[hemx::surface]`.
 
-use hemx_core::SafeHtml;
-#[cfg(not(target_arch = "wasm32"))]
-use hemx_core::{KeyedSlot, Slot};
+use hemx_core::{KeyedSlot, SafeHtml, Slot};
 
 pub use hemx_core::{
     navigate, push, redirect, replace, CssClass, CssClasses, Effect, Form, FormContract,
@@ -20,14 +18,6 @@ pub use hemx_core::{
 pub use hemx_core::{Atom, ComponentRef, EventName, GeneratedTarget, Handle, ParamName};
 pub use hemx_derive::{app, component, form, handler, surface};
 
-/// Browser/WASM integration used by `#[hemx::handler(client)]`.
-///
-/// The feature is opt-in so server-first applications do not compile or ship
-/// WASM dependencies.
-#[cfg(feature = "client")]
-#[doc(hidden)]
-pub use hemx_wasm as wasm;
-
 /// Advanced/raw hemx primitives used by generated code, integrations, and tests.
 ///
 /// Beginner-facing application code should prefer generated targets, generated
@@ -35,7 +25,6 @@ pub use hemx_wasm as wasm;
 pub mod advanced {
     pub use hemx_core::*;
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn render(view: &impl hemplate::Hemplate) -> crate::Html {
         crate::render_template(view)
     }
@@ -89,14 +78,12 @@ pub mod __private {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn render_template(view: &impl hemplate::Hemplate) -> Html {
     let mut html = String::with_capacity(view.size_hint());
     view.render_into(&mut html).unwrap();
     __private::html_trusted(html)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub fn page(view: &impl hemplate::Hemplate) -> Html {
     render_template(view)
 }
@@ -109,7 +96,6 @@ pub trait KeyedPartial {
     fn hemx_key(&self) -> String;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub fn render_html(view: &impl hemplate::Hemplate) -> Html {
     render_template(view)
@@ -119,7 +105,6 @@ pub fn render_html(view: &impl hemplate::Hemplate) -> Html {
 ///
 /// Prefer generated target objects such as `targets::list.put(&view)` so
 /// generated resource lowering stays attached to the view boundary.
-#[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub trait RenderSlotExt {
     fn render(self, view: &impl hemplate::Hemplate) -> Effect;
@@ -132,7 +117,6 @@ pub trait RenderSlotExt {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl<T> RenderSlotExt for Slot<T> {
     fn render(self, view: &impl hemplate::Hemplate) -> Effect {
         self.html(render_template(view))
@@ -143,7 +127,6 @@ impl<T> RenderSlotExt for Slot<T> {
 ///
 /// Prefer generated target objects such as `targets::row.append(&view)` so
 /// generated resource lowering stays attached to the view boundary.
-#[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub trait RenderKeyedSlotExt<K> {
     fn append(self, key: K, view: &impl hemplate::Hemplate) -> Effect;
@@ -172,7 +155,6 @@ pub trait RenderKeyedSlotExt<K> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl<K, T> RenderKeyedSlotExt<K> for KeyedSlot<K, T>
 where
     K: ToString,

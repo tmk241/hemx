@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["hemx", "hemx-core", "hemx-host", "hemx-derive", "hemx-js", "hemx-axum", "hemx-build", "hemx-test", "hemx-sync", "hemx-sync-macros", "hemx-wasm"]
+members = ["hemx", "hemx-core", "hemx-derive", "hemx-js", "hemx-axum", "hemx-build", "hemx-test", "tests/server-wasm"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"

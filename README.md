@@ -3,7 +3,9 @@
 Hemx is checked hypermedia for Rust. Applications render Hemplate views, handle
 events in typed Rust functions, and return generated UI effects. The browser runs
 a small effect interpreter instead of a virtual DOM, hydration framework, or
-client-side expression language.
+client-side expression language. The same core compiles for native servers and
+server-side Wasm isolates; platform storage, sockets, and lifecycle remain
+application concerns.
 
 ## How it works
 
@@ -40,8 +42,10 @@ The normal application path is:
 - `hemx` for handler and effect APIs;
 - `hemx-build` for generated resources;
 - `hemx-axum` for Axum integration;
-- `hemx-sync` when an application needs durable command/event/projection sync;
-- `hemx-host` for explicit browser or native-shell capabilities.
+- `hemx-js` for the browser effect runtime.
+
+Server-side Wasm uses the same core crates and canonical effect batches; it does
+not require a separate Hemx Wasm runtime package.
 
 ## Workspace
 
@@ -53,10 +57,6 @@ The normal application path is:
 | `hemx-build` | Build-time template analysis and generated resources |
 | `hemx-axum` | Axum routes, responses, assets, and server push |
 | `hemx-js` | Browser runtime source |
-| `hemx-wasm` | Client-local WASM integration |
-| `hemx-host` | Explicit host capability boundary |
-| `hemx-sync` | Optional durable sync primitives |
-| `hemx-sync-macros` | Derives for sync domain types |
 | `hemx-test` | Test support for applications |
 
 ## Agent skill
