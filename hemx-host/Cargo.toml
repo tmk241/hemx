@@ -21,4 +21,4 @@ std = ["serde/std"]
 serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
 
 [dev-dependencies]
-hemx-core = { version = "0.1.0", path = "../hemx-core" }
+hemx-core = { version = "0.2.0", path = "../hemx-core" }

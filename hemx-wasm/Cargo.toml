@@ -14,7 +14,7 @@ categories = ["wasm", "web-programming"]
 path = "src/lib.rs"
 
 [dependencies]
-hemx-core = { version = "0.1.0", path = "../hemx-core" }
+hemx-core = { version = "0.2.0", path = "../hemx-core" }
 wasm-bindgen = "=0.2.125"
 
 [dev-dependencies]

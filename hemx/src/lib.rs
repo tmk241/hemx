@@ -16,6 +16,7 @@ pub use hemx_core::{
 ///
 /// These stay addressable for compatibility, but ordinary app code should use generated
 /// helpers instead of naming raw handles, params, events, atoms, or component refs.
+///
 #[doc(hidden)]
 pub use hemx_core::{Atom, ComponentRef, EventName, GeneratedTarget, Handle, ParamName};
 pub use hemx_derive::{app, component, form, handler, surface};
@@ -105,6 +106,7 @@ pub fn page(view: &impl hemplate::Hemplate) -> Html {
 ///
 /// Generated keyed target helpers use this to keep ordinary handler code at the
 /// level of `ui::row.replace(row)` instead of `ui::row.replace(row.id, &row)`.
+///
 pub trait KeyedPartial {
     fn hemx_key(&self) -> String;
 }
@@ -206,7 +208,7 @@ mod tests {
     struct InlineView;
 
     impl hemplate::Hemplate for InlineView {
-        fn render_into(&self, out: &mut String) -> Result<(), hemplate::error::HemplateError> {
+        fn render_into(&self, out: &mut String) -> Result<(), hemplate::RenderError> {
             out.push_str("<strong>ok</strong>");
             Ok(())
         }
@@ -215,7 +217,7 @@ mod tests {
     struct HintTrackingView(Cell<bool>);
 
     impl hemplate::Hemplate for HintTrackingView {
-        fn render_into(&self, out: &mut String) -> Result<(), hemplate::error::HemplateError> {
+        fn render_into(&self, out: &mut String) -> Result<(), hemplate::RenderError> {
             out.push_str("<strong>hinted</strong>");
             Ok(())
         }

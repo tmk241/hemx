@@ -177,6 +177,7 @@ mod tests {
             }
         );
         assert_eq!(decoded_state, ClientState { encoded: state });
+        //       test
     }
 
     #[test]
@@ -241,6 +242,7 @@ mod tests {
                 expected
             );
         }
+        //       test
     }
 
     #[test]

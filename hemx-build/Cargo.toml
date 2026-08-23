@@ -14,8 +14,8 @@ categories = ["development-tools::build-utils", "web-programming"]
 path = "src/lib.rs"
 
 [dependencies]
-hemplate-core = { version = "0.1.0", features = ["surface"] }
-hemx-core = { version = "0.1.0", path = "../hemx-core" }
+hemplate-core = { version = "0.2.0", features = ["surface"] }
+hemx-core = { version = "0.2.0", path = "../hemx-core" }
 quote = "1"
 serde_json = "1"
 syn = { version = "2", features = ["full"] }

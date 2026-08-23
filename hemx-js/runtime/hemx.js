@@ -16,6 +16,7 @@
   const busyStates = new WeakMap();
   const disabledStates = new WeakMap();
   const sseSources = new WeakMap();
+  const webSockets = new WeakMap();
   const atomStores = new WeakMap();
   const dragKeys = new WeakMap();
   let currentOperationId = null;
@@ -941,6 +942,38 @@
     }
   }
 
+  function bindWebSocket(root) {
+    const url = root.getAttribute("data-hemx-ws");
+    if (!url || webSockets.has(root) || typeof WebSocket === "undefined") return;
+    const href = new URL(url, location.href);
+    if (href.origin !== location.origin) {
+      const error = new Error("hemx WebSocket URL must be same-origin");
+      showError(root, error);
+      emit(root, "hemx:ws-error", url);
+      return;
+    }
+    href.protocol = href.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(href.href);
+    socket.binaryType = "arraybuffer";
+    socket.addEventListener("message", (event) => applyWebSocketMessage(root, event));
+    socket.addEventListener("error", () => {
+      showError(root, new Error("hemx WebSocket failed"));
+      emit(root, "hemx:ws-error", url);
+    });
+    webSockets.set(root, socket);
+  }
+
+  function applyWebSocketMessage(root, event) {
+    try {
+      if (!(event.data instanceof ArrayBuffer)) throw new Error("hemx WebSocket messages must be binary");
+      applyBatch(event.data, root);
+      showError(root, null);
+    } catch (error) {
+      showError(root, error);
+      emit(root, "hemx:error", String(error));
+    }
+  }
+
   function duration(value) {
     if (!value) return 0;
     const match = String(value).trim().match(/^(\d+)(ms|s)?$/);
@@ -1135,6 +1168,9 @@
     const source = sseSources.get(root);
     if (source) source.close();
     sseSources.delete(root);
+    const socket = webSockets.get(root);
+    if (socket) socket.close();
+    webSockets.delete(root);
     const observers = revealObservers.get(root);
     if (observers) observers.forEach((observer) => observer.disconnect());
     revealObservers.delete(root);
@@ -1176,6 +1212,12 @@
         bindSse(root);
       } catch (error) {
         emit(root, "hemx:sse-error", String(error));
+      }
+      try {
+        bindWebSocket(root);
+      } catch (error) {
+        showError(root, error);
+        emit(root, "hemx:ws-error", String(error));
       }
     });
     new MutationObserver((records) => {

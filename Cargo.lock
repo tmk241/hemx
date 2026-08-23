@@ -615,19 +615,20 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "hemplate"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1978b9d52e16ada6c7deab90b585b85c47bca4f456ea75fca9680da940c5a63d"
+checksum = "2fbe24674c08ea9cb50edc015ebd364785a7e3985259dc02de1a20b7b2ba6365"
 dependencies = [
  "hemplate-core",
  "hemplate-derive",
+ "hemplate-runtime",
 ]
 
 [[package]]
 name = "hemplate-core"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe91aa04a55f6c67ca247e7dd6f0d0cddc60c7669bdb16bf9cb646a39f26e13e"
+checksum = "afe08241413edd4646684b396061b67e7fd17856f7e28d6765689612e2085303"
 dependencies = [
  "hemplate-parser",
  "thiserror",
@@ -636,9 +637,9 @@ dependencies = [
 
 [[package]]
 name = "hemplate-derive"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7e1034594ce724e2f99981144d1f7a4f5b4c0c0df0ab85352476f0510600352"
+checksum = "4ed77b2cc320137a6a68866f7aa8231292638f0b7c02f65cef221fe713fc2bad"
 dependencies = [
  "hemplate-core",
  "proc-macro2",
@@ -657,8 +658,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "hemx"
+name = "hemplate-runtime"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8e235b36e44fe1174267df3ad0952a728afe4305edfbc8804a972b5f0121c06"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "hemx"
+version = "0.2.0"
 dependencies = [
  "hemplate",
  "hemx-core",
@@ -668,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "hemx-axum"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -681,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "hemx-build"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hemplate-core",
  "hemx-core",
@@ -692,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "hemx-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "postcard",
  "serde",
@@ -700,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "hemx-derive"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -709,7 +719,7 @@ dependencies = [
 
 [[package]]
 name = "hemx-host"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hemx-core",
  "serde",
@@ -717,14 +727,14 @@ dependencies = [
 
 [[package]]
 name = "hemx-js"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "hemx-sync"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hemx-core",
  "hemx-sync-macros",
@@ -734,7 +744,7 @@ dependencies = [
 
 [[package]]
 name = "hemx-sync-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -743,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "hemx-test"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "hemx-axum",
@@ -756,7 +766,7 @@ dependencies = [
 
 [[package]]
 name = "hemx-wasm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hemx-core",
  "serde_json",

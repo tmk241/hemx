@@ -11,8 +11,8 @@ keywords = ["hypermedia", "sync", "events", "web"]
 categories = ["web-programming"]
 
 [dependencies]
-hemx-core = { version = "0.1.0", path = "../hemx-core" }
-hemx-sync-macros = { version = "0.1.0", path = "../hemx-sync-macros" }
+hemx-core = { version = "0.2.0", path = "../hemx-core" }
+hemx-sync-macros = { version = "0.2.0", path = "../hemx-sync-macros" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

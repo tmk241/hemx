@@ -135,6 +135,7 @@ fn canonical_wire_covers_every_closed_variant_and_rejects_truncation() {
             "prefix ending at byte {end} must fail closed"
         );
     }
+    //    test
 }
 
 #[test]
@@ -207,6 +208,7 @@ fn canonical_wire_rejects_corrupt_tags_utf8_magic_and_trailing_bytes() {
         EffectBatch::from_wire(&trailing),
         Err(WireError::TrailingBytes)
     );
+    //   test
 }
 
 #[test]

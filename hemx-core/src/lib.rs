@@ -69,6 +69,7 @@ impl ResourceId {
 }
 
 /// A generated UI target that can be inspected without exposing raw slots.
+///
 pub trait GeneratedTarget {
     #[doc(hidden)]
     fn __hemx_resource_id(self) -> ResourceId;
@@ -215,6 +216,7 @@ impl core::fmt::Display for CssClass {
 }
 
 /// A generated, checked parameter token.
+///
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct ParamName {
     name: &'static str,
@@ -243,6 +245,7 @@ impl core::fmt::Display for ParamName {
 }
 
 /// A generated, checked component token.
+///
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct ComponentRef {
     name: &'static str,
@@ -271,6 +274,7 @@ impl core::fmt::Display for ComponentRef {
 }
 
 /// A generated, checked event token.
+///
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct EventName {
     name: &'static str,
@@ -309,6 +313,7 @@ impl core::fmt::Display for EventName {
 }
 
 /// A small displayable list of generated CSS class tokens for hemplate `+class`.
+///
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct CssClasses {
     names: String,
@@ -460,6 +465,7 @@ impl EffectBatch {
     /// let batch = hemx_core::EffectBatch::new(hemx_core::BuildFingerprint(1));
     /// let _ = batch.to_postcard();
     /// ```
+    ///  test
     /// Return the exact number of bytes produced by [`Self::to_wire`].
     pub fn encoded_len(&self) -> usize {
         batch_wire_len(self)

@@ -1599,6 +1599,7 @@ fn known_hemx_attr(name: &str) -> bool {
         name,
         "data-hemx-root"
             | "data-hemx-sse"
+            | "data-hemx-ws"
             | "data-hemx-st"
             | "data-hemx-handle"
             | "data-hemx-slot"
@@ -1726,6 +1727,14 @@ fn reject_invalid_hemx_attr_values(path: &Path, attrs: &[SurfaceAttribute]) -> i
                     "expected a non-empty same-origin SSE URL",
                 ));
             }
+            "data-hemx-ws" if value.trim().is_empty() => {
+                return Err(invalid_hemx_value(
+                    path,
+                    &attr.name,
+                    value,
+                    "expected a non-empty same-origin WebSocket URL",
+                ));
+            }
             "data-hemx-revealed-ahead"
                 if !value
                     .trim()
@@ -1791,6 +1800,13 @@ fn reject_invalid_hemx_attr_placement(
         return Err(invalid_hemx_placement(
             path,
             "data-hemx-sse",
+            "expected placement on the same element as `data-hemx-root`",
+        ));
+    }
+    if has_attr(attrs, "data-hemx-ws") && !has_attr(attrs, "data-hemx-root") {
+        return Err(invalid_hemx_placement(
+            path,
+            "data-hemx-ws",
             "expected placement on the same element as `data-hemx-root`",
         ));
     }
@@ -2197,7 +2213,7 @@ fn rust_ident(name: &str) -> Option<String> {
 
 fn stable_id(kind: &str, symbol: &str) -> u32 {
     let mut hash = 0x811c9dc5u32;
-    for byte in kind.bytes().chain(*b":").chain(symbol.bytes()) {
+    for byte in kind.bytes().chain([b':']).chain(symbol.bytes()) {
         hash ^= byte as u32;
         hash = hash.wrapping_mul(0x01000193);
     }
@@ -3585,7 +3601,7 @@ mod tests {
                 .count(),
             1,
             "conditional controls with one submitted name are one Rust form field"
-        ); // test
+        ); //  test
         assert!(syms.contains("form_field\tprofile\tlabels\tfalse\ttrue\n"));
 
         let _ = std::fs::remove_dir_all(&base);
@@ -3593,6 +3609,7 @@ mod tests {
 
     #[test]
     fn emits_checked_css_class_tokens_from_templates_and_stylesheets() {
+        // ,
         let base = test_dir("hemx-build-classes-test");
         let templates = base.join("templates");
         let out = base.join("out");
@@ -4206,6 +4223,12 @@ fn main() {{
                 "non-empty",
             ),
             (
+                "ws-empty",
+                r#"<main data-hemx-root="app" data-hemx-ws=" "></main>"#,
+                "data-hemx-ws",
+                "non-empty",
+            ),
+            (
                 "delay-empty",
                 r#"<button data-hemx-handle="save" data-hemx-delay="">Save</button>"#,
                 "data-hemx-delay",
@@ -4331,6 +4354,7 @@ fn main() {{
                 "data-hemx-on" => "expected runtime-supported events: `click`, `submit`, `input`, `change`, `keydown`, `dragstart`, `dragover`, or `drop`",
                 "data-hemx-confirm" => "expected a non-empty confirmation message",
                 "data-hemx-sse" => "expected a non-empty same-origin SSE URL",
+                "data-hemx-ws" => "expected a non-empty same-origin WebSocket URL",
                 "data-hemx-debounce" | "data-hemx-delay" | "data-hemx-throttle"
                 | "data-hemx-every" | "data-hemx-interval" => {
                     "expected milliseconds like `250`/`250ms` or seconds like `1s`"
@@ -4410,7 +4434,7 @@ fn main() {{
         }
 
         let valid_source = r#"
-            <main data-hemx-root="app" data-hemx-client-module="/app.js" data-hemx-sse="/events">
+            <main data-hemx-root="app" data-hemx-client-module="/app.js" data-hemx-sse="/events" data-hemx-ws="/room/socket">
                 <button data-hemx-handle="save" data-hemx-policy="latest" data-hemx-on="click change" data-hemx-confirm="Save?" data-hemx-delay="250ms" data-hemx-throttle="1s">Save</button>
                 <button data-hemx-client="save" data-hemx-client-event="click" data-hemx-client-policy="drop" data-hemx-client-state-version="1">Client</button>
                 <form method="get" action="/search" data-hemx-history="replace"><input name="q"></form>
@@ -4471,6 +4495,12 @@ fn main() {{
                 "data-hemx-sse",
                 "expected placement on the same element as `data-hemx-root`",
             ),
+            (
+                "ws-child",
+                r#"<section data-hemx-root="room"><div data-hemx-ws="/room/socket"></div></section>"#,
+                "data-hemx-ws",
+                "expected placement on the same element as `data-hemx-root`",
+            ),
         ] {
             let base = test_dir(&format!("hemx-build-invalid-placement-{case}-test"));
             let templates = base.join("templates");
@@ -4511,6 +4541,10 @@ fn main() {{
                 "sse-root",
                 r#"<main data-hemx-root="feed" data-hemx-sse="/events"></main>"#,
             ),
+            (
+                "ws-root",
+                r#"<main data-hemx-root="room" data-hemx-ws="/room/socket"></main>"#,
+            ),
         ] {
             let base = test_dir(&format!("hemx-build-valid-placement-{case}-test"));
             let templates = base.join("templates");
@@ -4525,6 +4559,7 @@ fn main() {{
 
     #[test]
     fn generated_lowering_injects_progressive_form_handle_and_key() {
+        // ,
         let base = test_dir("hemx-build-lowering-test");
         let templates = base.join("templates");
         let out = base.join("out");
@@ -4582,7 +4617,7 @@ fn main() {{
     let html = todo::lower_html(r#"<form data-hemx-handle="create"><input name="title"></form><li data-hemx-slot="row" h-key="7"></li>"#);
     assert!(html.contains(r#"data-hid="#));
     assert!(html.contains(r#"name="__h""#));
-    assert!(html.contains(r#"data-key="7""#)); // test
+    assert!(html.contains(r#"data-key="7""#)); //  test
     assert!(!html.contains("h-key"));
 }}
 "###,

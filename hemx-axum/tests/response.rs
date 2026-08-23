@@ -16,11 +16,10 @@ use hemx_axum::{
 use hemx_core::{push, BuildFingerprint, Effect, Handle, IntoEffect, SafeHtml, Slot};
 use scraper::{Html, Selector};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 static MUTATION_CALLS: AtomicUsize = AtomicUsize::new(0);
-static BOUNDARY_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+static BOUNDARY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn bounded_mutation(_: InteractionRequest) -> StatusCode {
     MUTATION_CALLS.fetch_add(1, Ordering::SeqCst);
@@ -855,7 +854,7 @@ async fn state_result_registration_paths_preserve_state_form_and_failures() {
             typed,
             String::from("typed"),
             |state: State<String>, Form(form): Form<OpenProject>| {
-                Err::<Effect, _>(HandlerBoom).inspect_err(|_error| {
+                Err::<Effect, _>(HandlerBoom).inspect_err(|_| {
                     let _ = (state, form);
                 })
             },
