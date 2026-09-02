@@ -1,4 +1,4 @@
-export type ResourceKind = "slot" | "atom" | "handle" | "form";
+export type ResourceKind = "slot" | "handle" | "form";
 
 export interface ResourceId {
   kind: ResourceKind;
@@ -14,34 +14,32 @@ export interface ResourceRef {
   scope: ScopeKey | null;
 }
 
-export type Payload =
-  | { kind: "text"; value: string }
-  | { kind: "html"; value: string };
+export type InsertPosition =
+  | "first"
+  | "last"
+  | { kind: "before"; target: ResourceRef }
+  | { kind: "after"; target: ResourceRef };
 
-export type ScrollBehavior =
-  | "preserve"
-  | "top"
-  | { kind: "element"; target: ResourceRef };
+export type MovePosition = InsertPosition;
+export type PatchMode = "morph" | "replace";
+export type ScrollBlock = "start" | "center" | "end" | "nearest";
+export type ScrollBehavior = "auto" | "instant" | "smooth";
+export type HistoryMode = "push" | "replace";
 
 export type Effect =
-  | { kind: "put"; target: ResourceRef; payload: Payload }
-  | { kind: "insert"; target: ResourceRef; key: string; payload: Payload }
-  | { kind: "prepend"; target: ResourceRef; key: string; payload: Payload }
-  | { kind: "remove"; target: ResourceRef; key: string | null }
-  | { kind: "move"; target: ResourceRef; key: string; before: string | null }
-  | { kind: "focus"; target: ResourceRef }
-  | { kind: "navigate"; url: string; mode: "push" | "replace" | "redirect"; scroll: ScrollBehavior; title: string | null }
-  | { kind: "emit"; name: string; payload: string };
+  | { kind: "patch"; target: ResourceRef; mode: PatchMode; html: string }
+  | { kind: "insert"; target: ResourceRef; position: InsertPosition; html: string }
+  | { kind: "remove"; target: ResourceRef }
+  | { kind: "move"; target: ResourceRef; position: MovePosition }
+  | { kind: "focus"; target: ResourceRef; preventScroll: boolean }
+  | { kind: "scroll"; target: ResourceRef; block: ScrollBlock; behavior: ScrollBehavior }
+  | { kind: "visit"; url: string; history: HistoryMode }
+  | { kind: "dispatch"; event: string; payload: Uint8Array };
 
 export interface EffectBatch {
   abiVersion: number;
   fingerprint: bigint;
   ops: Effect[];
-}
-
-export interface AtomSnapshot {
-  id: number;
-  bytes: Uint8Array;
 }
 
 export interface HemxRuntime {
@@ -51,8 +49,6 @@ export interface HemxRuntime {
   applyHtml(html: string, root?: ParentNode | null, title?: string | null): boolean;
   applyBatch(buffer: ArrayBuffer, root?: ParentNode | null): void;
   decodeBatch(buffer: ArrayBuffer): EffectBatch;
-  atomValue(root: Element | ParentNode | null | undefined, id: number): Uint8Array | undefined;
-  decodeAtomState(encoded: string): AtomSnapshot[];
 }
 
 declare global {

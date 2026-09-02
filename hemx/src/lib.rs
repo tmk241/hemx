@@ -13,9 +13,9 @@ pub use hemx_core::{
 /// Generated metadata tokens used by macros, generated code, integrations, and tests.
 ///
 /// These stay addressable for compatibility, but ordinary app code should use generated
-/// helpers instead of naming raw handles, params, events, atoms, or component refs.
+/// helpers instead of naming raw handles, params, events, or component refs.
 #[doc(hidden)]
-pub use hemx_core::{Atom, ComponentRef, EventName, GeneratedTarget, Handle, ParamName};
+pub use hemx_core::{ComponentRef, EventName, GeneratedTarget, Handle, ParamName};
 pub use hemx_derive::{app, component, form, handler, surface};
 
 /// Advanced/raw hemx primitives used by generated code, integrations, and tests.
@@ -188,8 +188,8 @@ mod tests {
     struct InlineView;
 
     impl hemplate::Hemplate for InlineView {
-        fn render_into(&self, out: &mut String) -> Result<(), hemplate::RenderError> {
-            out.push_str("<strong>ok</strong>");
+        fn render_into(&self, out: &mut dyn core::fmt::Write) -> Result<(), hemplate::RenderError> {
+            out.write_str("<strong>ok</strong>")?;
             Ok(())
         }
     }
@@ -197,8 +197,8 @@ mod tests {
     struct HintTrackingView(Cell<bool>);
 
     impl hemplate::Hemplate for HintTrackingView {
-        fn render_into(&self, out: &mut String) -> Result<(), hemplate::RenderError> {
-            out.push_str("<strong>hinted</strong>");
+        fn render_into(&self, out: &mut dyn core::fmt::Write) -> Result<(), hemplate::RenderError> {
+            out.write_str("<strong>hinted</strong>")?;
             Ok(())
         }
 

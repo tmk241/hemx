@@ -14,27 +14,6 @@ pub const RUNTIME_ABI_VERSION: u32 = 1;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct BuildFingerprint(pub u64);
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AtomSnapshot {
-    pub id: u32,
-    pub bytes: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AtomState {
-    pub atoms: Vec<AtomSnapshot>,
-}
-
-impl AtomState {
-    pub fn to_postcard(&self) -> Result<Vec<u8>, postcard::Error> {
-        postcard::to_allocvec(self)
-    }
-
-    pub fn from_postcard(bytes: &[u8]) -> Result<Self, postcard::Error> {
-        postcard::from_bytes(bytes)
-    }
-}
-
 impl BuildFingerprint {
     pub const fn from_parts(parts: &[u32]) -> Self {
         let mut hash = 0xcbf29ce484222325u64;
@@ -51,7 +30,6 @@ impl BuildFingerprint {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum ResourceKind {
     Slot,
-    Atom,
     Handle,
     Form,
 }
@@ -103,33 +81,43 @@ impl ResourceRef {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub enum NavigateMode {
-    Push,
+pub enum PatchMode {
+    Morph,
     Replace,
-    Redirect,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum InsertPosition {
+    First,
+    Last,
+    Before(ResourceRef),
+    After(ResourceRef),
+}
+
+pub type MovePosition = InsertPosition;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum ScrollBlock {
+    Start,
+    Center,
+    End,
+    Nearest,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum ScrollBehavior {
-    Preserve,
-    Top,
-    Element(ResourceRef),
+    Auto,
+    Instant,
+    Smooth,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum Payload {
-    Text(String),
-    Html(String),
-}
+pub type Url = String;
+pub type EventRef = String;
 
-impl Payload {
-    pub fn text(value: impl ToString) -> Self {
-        Self::Text(value.to_string())
-    }
-
-    pub fn html(value: SafeHtml) -> Self {
-        Self::Html(value.into_string())
-    }
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum HistoryMode {
+    Push,
+    Replace,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -408,41 +396,39 @@ pub enum FormControlKind {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Effect {
-    Put {
+    Patch {
         target: ResourceRef,
-        payload: Payload,
+        mode: PatchMode,
+        html: SafeHtml,
     },
     Insert {
         target: ResourceRef,
-        key: String,
-        payload: Payload,
-    },
-    Prepend {
-        target: ResourceRef,
-        key: String,
-        payload: Payload,
+        position: InsertPosition,
+        html: SafeHtml,
     },
     Remove {
         target: ResourceRef,
-        key: Option<String>,
     },
     Move {
         target: ResourceRef,
-        key: String,
-        before: Option<String>,
+        position: MovePosition,
     },
     Focus {
         target: ResourceRef,
+        prevent_scroll: bool,
     },
-    Navigate {
-        url: String,
-        mode: NavigateMode,
-        scroll: ScrollBehavior,
-        title: Option<String>,
+    Scroll {
+        target: ResourceRef,
+        block: ScrollBlock,
+        behavior: ScrollBehavior,
     },
-    Emit {
-        name: String,
-        payload: String,
+    Visit {
+        url: Url,
+        history: HistoryMode,
+    },
+    Dispatch {
+        event: EventRef,
+        payload: Vec<u8>,
     },
 }
 
@@ -486,6 +472,7 @@ impl EffectBatch {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WireError {
     BadMagic,
+    UnsupportedVersion,
     Truncated,
     InvalidUtf8,
     UnknownTag,
@@ -501,33 +488,36 @@ fn batch_wire_len(batch: &EffectBatch) -> usize {
 
 fn effect_wire_len(effect: &Effect) -> usize {
     1 + match effect {
-        Effect::Put { target, payload } => ref_wire_len(target) + payload_wire_len(payload),
+        Effect::Patch { target, html, .. } => {
+            ref_wire_len(target) + 1 + str_wire_len(html.as_str())
+        }
         Effect::Insert {
             target,
-            key,
-            payload,
+            position,
+            html,
+        } => ref_wire_len(target) + position_wire_len(position) + str_wire_len(html.as_str()),
+        Effect::Remove { target } => ref_wire_len(target),
+        Effect::Move { target, position } => ref_wire_len(target) + position_wire_len(position),
+        Effect::Focus { target, .. } => ref_wire_len(target) + 1,
+        Effect::Scroll { target, .. } => ref_wire_len(target) + 2,
+        Effect::Visit { url, .. } => str_wire_len(url) + 1,
+        Effect::Dispatch { event, payload } => {
+            str_wire_len(event.as_str()) + str_wire_len_bytes(payload)
         }
-        | Effect::Prepend {
-            target,
-            key,
-            payload,
-        } => ref_wire_len(target) + str_wire_len(key) + payload_wire_len(payload),
-        Effect::Remove { target, key } => {
-            ref_wire_len(target) + option_str_wire_len(key.as_deref())
-        }
-        Effect::Move {
-            target,
-            key,
-            before,
-        } => ref_wire_len(target) + str_wire_len(key) + option_str_wire_len(before.as_deref()),
-        Effect::Focus { target } => ref_wire_len(target),
-        Effect::Navigate {
-            url, scroll, title, ..
-        } => {
-            str_wire_len(url) + 1 + scroll_wire_len(scroll) + option_str_wire_len(title.as_deref())
-        }
-        Effect::Emit { name, payload } => str_wire_len(name) + str_wire_len(payload),
     }
+}
+
+fn position_wire_len(position: &InsertPosition) -> usize {
+    1 + match position {
+        InsertPosition::First | InsertPosition::Last => 0,
+        InsertPosition::Before(reference) | InsertPosition::After(reference) => {
+            ref_wire_len(reference)
+        }
+    }
+}
+
+fn str_wire_len_bytes(value: &[u8]) -> usize {
+    4 + value.len()
 }
 
 fn ref_wire_len(reference: &ResourceRef) -> usize {
@@ -537,23 +527,6 @@ fn ref_wire_len(reference: &ResourceRef) -> usize {
             None => 0,
             Some(ScopeKey::KeyValue(value) | ScopeKey::Field(value)) => str_wire_len(value),
         }
-}
-
-fn payload_wire_len(payload: &Payload) -> usize {
-    1 + match payload {
-        Payload::Text(value) | Payload::Html(value) => str_wire_len(value),
-    }
-}
-
-fn scroll_wire_len(scroll: &ScrollBehavior) -> usize {
-    1 + match scroll {
-        ScrollBehavior::Preserve | ScrollBehavior::Top => 0,
-        ScrollBehavior::Element(target) => ref_wire_len(target),
-    }
-}
-
-fn option_str_wire_len(value: Option<&str>) -> usize {
-    1 + value.map_or(0, str_wire_len)
 }
 
 const fn str_wire_len(value: &str) -> usize {
@@ -572,73 +545,100 @@ fn write_batch(batch: &EffectBatch, out: &mut Vec<u8>) {
 
 fn write_effect(effect: &Effect, out: &mut Vec<u8>) {
     match effect {
-        Effect::Put { target, payload } => {
+        Effect::Patch { target, mode, html } => {
             write_u8(0, out);
             write_ref(target, out);
-            write_payload(payload, out);
-        }
-        Effect::Insert {
-            target,
-            key,
-            payload,
-        } => {
-            write_u8(1, out);
-            write_ref(target, out);
-            write_str(key, out);
-            write_payload(payload, out);
-        }
-        Effect::Prepend {
-            target,
-            key,
-            payload,
-        } => {
-            write_u8(2, out);
-            write_ref(target, out);
-            write_str(key, out);
-            write_payload(payload, out);
-        }
-        Effect::Remove { target, key } => {
-            write_u8(3, out);
-            write_ref(target, out);
-            write_option_str(key.as_deref(), out);
-        }
-        Effect::Move {
-            target,
-            key,
-            before,
-        } => {
-            write_u8(4, out);
-            write_ref(target, out);
-            write_str(key, out);
-            write_option_str(before.as_deref(), out);
-        }
-        Effect::Focus { target } => {
-            write_u8(5, out);
-            write_ref(target, out);
-        }
-        Effect::Navigate {
-            url,
-            mode,
-            scroll,
-            title,
-        } => {
-            write_u8(6, out);
-            write_str(url, out);
             write_u8(
                 match mode {
-                    NavigateMode::Push => 0,
-                    NavigateMode::Replace => 1,
-                    NavigateMode::Redirect => 2,
+                    PatchMode::Morph => 0,
+                    PatchMode::Replace => 1,
                 },
                 out,
             );
-            write_scroll(scroll, out);
-            write_option_str(title.as_deref(), out);
+            write_str(html.as_str(), out);
         }
-        Effect::Emit { name, payload } => {
+        Effect::Insert {
+            target,
+            position,
+            html,
+        } => {
+            write_u8(1, out);
+            write_ref(target, out);
+            write_position(position, out);
+            write_str(html.as_str(), out);
+        }
+        Effect::Remove { target } => {
+            write_u8(2, out);
+            write_ref(target, out);
+        }
+        Effect::Move { target, position } => {
+            write_u8(3, out);
+            write_ref(target, out);
+            write_position(position, out);
+        }
+        Effect::Focus {
+            target,
+            prevent_scroll,
+        } => {
+            write_u8(4, out);
+            write_ref(target, out);
+            write_u8(u8::from(*prevent_scroll), out);
+        }
+        Effect::Scroll {
+            target,
+            block,
+            behavior,
+        } => {
+            write_u8(5, out);
+            write_ref(target, out);
+            write_u8(
+                match block {
+                    ScrollBlock::Start => 0,
+                    ScrollBlock::Center => 1,
+                    ScrollBlock::End => 2,
+                    ScrollBlock::Nearest => 3,
+                },
+                out,
+            );
+            write_u8(
+                match behavior {
+                    ScrollBehavior::Auto => 0,
+                    ScrollBehavior::Instant => 1,
+                    ScrollBehavior::Smooth => 2,
+                },
+                out,
+            );
+        }
+        Effect::Visit { url, history } => {
+            write_u8(6, out);
+            write_str(url, out);
+            write_u8(
+                match history {
+                    HistoryMode::Push => 0,
+                    HistoryMode::Replace => 1,
+                },
+                out,
+            );
+        }
+        Effect::Dispatch { event, payload } => {
             write_u8(7, out);
-            write_str(name, out);
-            write_str(payload, out);
+            write_str(event.as_str(), out);
+            write_bytes(payload, out);
+        }
+    }
+}
+
+fn write_position(position: &InsertPosition, out: &mut Vec<u8>) {
+    match position {
+        InsertPosition::First => write_u8(0, out),
+        InsertPosition::Last => write_u8(1, out),
+        InsertPosition::Before(reference) => {
+            write_u8(2, out);
+            write_ref(reference, out);
+        }
+        InsertPosition::After(reference) => {
+            write_u8(3, out);
+            write_ref(reference, out);
         }
     }
 }
@@ -647,7 +647,6 @@ fn write_ref(reference: &ResourceRef, out: &mut Vec<u8>) {
     write_u8(
         match reference.resource.kind {
             ResourceKind::Slot => 0,
-            ResourceKind::Atom => 1,
             ResourceKind::Handle => 2,
             ResourceKind::Form => 3,
         },
@@ -667,38 +666,9 @@ fn write_ref(reference: &ResourceRef, out: &mut Vec<u8>) {
     }
 }
 
-fn write_payload(payload: &Payload, out: &mut Vec<u8>) {
-    match payload {
-        Payload::Text(value) => {
-            write_u8(0, out);
-            write_str(value, out);
-        }
-        Payload::Html(value) => {
-            write_u8(1, out);
-            write_str(value, out);
-        }
-    }
-}
-
-fn write_scroll(scroll: &ScrollBehavior, out: &mut Vec<u8>) {
-    match scroll {
-        ScrollBehavior::Preserve => write_u8(0, out),
-        ScrollBehavior::Top => write_u8(1, out),
-        ScrollBehavior::Element(target) => {
-            write_u8(2, out);
-            write_ref(target, out);
-        }
-    }
-}
-
-fn write_option_str(value: Option<&str>, out: &mut Vec<u8>) {
-    match value {
-        None => write_u8(0, out),
-        Some(value) => {
-            write_u8(1, out);
-            write_str(value, out);
-        }
-    }
+fn write_bytes(value: &[u8], out: &mut Vec<u8>) {
+    write_u32(value.len() as u32, out);
+    out.extend_from_slice(value);
 }
 
 fn write_str(value: &str, out: &mut Vec<u8>) {
@@ -761,6 +731,11 @@ impl<'a> WireReader<'a> {
             .map_err(|_| WireError::InvalidUtf8)
     }
 
+    fn read_bytes(&mut self) -> Result<Vec<u8>, WireError> {
+        let len = self.read_u32()? as usize;
+        Ok(self.read_exact(len)?.to_vec())
+    }
+
     fn read_exact(&mut self, len: usize) -> Result<&'a [u8], WireError> {
         let remaining = &self.bytes[self.offset..];
         let bytes = remaining.get(..len).ok_or(WireError::Truncated)?;
@@ -775,6 +750,9 @@ fn read_batch(bytes: &[u8]) -> Result<EffectBatch, WireError> {
         return Err(WireError::BadMagic);
     }
     let abi_version = reader.read_u32()?;
+    if abi_version != EFFECT_BATCH_ABI_VERSION {
+        return Err(WireError::UnsupportedVersion);
+    }
     let fingerprint = BuildFingerprint(reader.read_u64()?);
     let ops_len = reader.read_u32()?;
     let mut ops = Vec::new();
@@ -791,47 +769,73 @@ fn read_batch(bytes: &[u8]) -> Result<EffectBatch, WireError> {
 
 fn read_effect(reader: &mut WireReader<'_>) -> Result<Effect, WireError> {
     match reader.read_u8()? {
-        0 => Ok(Effect::Put {
+        0 => Ok(Effect::Patch {
             target: read_ref(reader)?,
-            payload: read_payload(reader)?,
+            mode: match reader.read_u8()? {
+                0 => PatchMode::Morph,
+                1 => PatchMode::Replace,
+                _ => return Err(WireError::UnknownTag),
+            },
+            html: SafeHtml::trusted(reader.read_str()?),
         }),
         1 => Ok(Effect::Insert {
             target: read_ref(reader)?,
-            key: reader.read_str()?,
-            payload: read_payload(reader)?,
+            position: read_position(reader)?,
+            html: SafeHtml::trusted(reader.read_str()?),
         }),
-        2 => Ok(Effect::Prepend {
-            target: read_ref(reader)?,
-            key: reader.read_str()?,
-            payload: read_payload(reader)?,
-        }),
-        3 => Ok(Effect::Remove {
-            target: read_ref(reader)?,
-            key: read_option_str(reader)?,
-        }),
-        4 => Ok(Effect::Move {
-            target: read_ref(reader)?,
-            key: reader.read_str()?,
-            before: read_option_str(reader)?,
-        }),
-        5 => Ok(Effect::Focus {
+        2 => Ok(Effect::Remove {
             target: read_ref(reader)?,
         }),
-        6 => Ok(Effect::Navigate {
-            url: reader.read_str()?,
-            mode: match reader.read_u8()? {
-                0 => NavigateMode::Push,
-                1 => NavigateMode::Replace,
-                2 => NavigateMode::Redirect,
+        3 => Ok(Effect::Move {
+            target: read_ref(reader)?,
+            position: read_position(reader)?,
+        }),
+        4 => Ok(Effect::Focus {
+            target: read_ref(reader)?,
+            prevent_scroll: match reader.read_u8()? {
+                0 => false,
+                1 => true,
                 _ => return Err(WireError::UnknownTag),
             },
-            scroll: read_scroll(reader)?,
-            title: read_option_str(reader)?,
         }),
-        7 => Ok(Effect::Emit {
-            name: reader.read_str()?,
-            payload: reader.read_str()?,
+        5 => Ok(Effect::Scroll {
+            target: read_ref(reader)?,
+            block: match reader.read_u8()? {
+                0 => ScrollBlock::Start,
+                1 => ScrollBlock::Center,
+                2 => ScrollBlock::End,
+                3 => ScrollBlock::Nearest,
+                _ => return Err(WireError::UnknownTag),
+            },
+            behavior: match reader.read_u8()? {
+                0 => ScrollBehavior::Auto,
+                1 => ScrollBehavior::Instant,
+                2 => ScrollBehavior::Smooth,
+                _ => return Err(WireError::UnknownTag),
+            },
         }),
+        6 => Ok(Effect::Visit {
+            url: reader.read_str()?,
+            history: match reader.read_u8()? {
+                0 => HistoryMode::Push,
+                1 => HistoryMode::Replace,
+                _ => return Err(WireError::UnknownTag),
+            },
+        }),
+        7 => Ok(Effect::Dispatch {
+            event: reader.read_str()?,
+            payload: reader.read_bytes()?,
+        }),
+        _ => Err(WireError::UnknownTag),
+    }
+}
+
+fn read_position(reader: &mut WireReader<'_>) -> Result<InsertPosition, WireError> {
+    match reader.read_u8()? {
+        0 => Ok(InsertPosition::First),
+        1 => Ok(InsertPosition::Last),
+        2 => Ok(InsertPosition::Before(read_ref(reader)?)),
+        3 => Ok(InsertPosition::After(read_ref(reader)?)),
         _ => Err(WireError::UnknownTag),
     }
 }
@@ -839,7 +843,6 @@ fn read_effect(reader: &mut WireReader<'_>) -> Result<Effect, WireError> {
 fn read_ref(reader: &mut WireReader<'_>) -> Result<ResourceRef, WireError> {
     let kind = match reader.read_u8()? {
         0 => ResourceKind::Slot,
-        1 => ResourceKind::Atom,
         2 => ResourceKind::Handle,
         3 => ResourceKind::Form,
         _ => return Err(WireError::UnknownTag),
@@ -852,31 +855,6 @@ fn read_ref(reader: &mut WireReader<'_>) -> Result<ResourceRef, WireError> {
         _ => return Err(WireError::UnknownTag),
     };
     Ok(ResourceRef { resource, scope })
-}
-
-fn read_payload(reader: &mut WireReader<'_>) -> Result<Payload, WireError> {
-    match reader.read_u8()? {
-        0 => Ok(Payload::Text(reader.read_str()?)),
-        1 => Ok(Payload::Html(reader.read_str()?)),
-        _ => Err(WireError::UnknownTag),
-    }
-}
-
-fn read_scroll(reader: &mut WireReader<'_>) -> Result<ScrollBehavior, WireError> {
-    match reader.read_u8()? {
-        0 => Ok(ScrollBehavior::Preserve),
-        1 => Ok(ScrollBehavior::Top),
-        2 => Ok(ScrollBehavior::Element(read_ref(reader)?)),
-        _ => Err(WireError::UnknownTag),
-    }
-}
-
-fn read_option_str(reader: &mut WireReader<'_>) -> Result<Option<String>, WireError> {
-    match reader.read_u8()? {
-        0 => Ok(None),
-        1 => Ok(Some(reader.read_str()?)),
-        _ => Err(WireError::UnknownTag),
-    }
 }
 
 pub trait IntoEffect {
@@ -988,16 +966,14 @@ impl<T> Slot<T> {
     }
 
     pub fn text(self, value: impl ToString) -> Effect {
-        Effect::Put {
-            target: ResourceRef::unscoped(self.id),
-            payload: Payload::text(value),
-        }
+        self.html(SafeHtml::trusted(value.to_string()))
     }
 
     pub fn html(self, value: impl Into<SafeHtml>) -> Effect {
-        Effect::Put {
+        Effect::Patch {
             target: ResourceRef::unscoped(self.id),
-            payload: Payload::html(value.into()),
+            mode: PatchMode::Morph,
+            html: value.into(),
         }
     }
 }
@@ -1042,9 +1018,9 @@ where
         T: ToString,
     {
         Effect::Insert {
-            target: ResourceRef::unscoped(self.id),
-            key: key.to_string(),
-            payload: Payload::text(value),
+            target: ResourceRef::scoped(self.id, ScopeKey::KeyValue(key.to_string())),
+            position: InsertPosition::Last,
+            html: SafeHtml::trusted(value.to_string()),
         }
     }
 
@@ -1052,10 +1028,10 @@ where
     where
         T: ToString,
     {
-        Effect::Prepend {
-            target: ResourceRef::unscoped(self.id),
-            key: key.to_string(),
-            payload: Payload::text(value),
+        Effect::Insert {
+            target: ResourceRef::scoped(self.id, ScopeKey::KeyValue(key.to_string())),
+            position: InsertPosition::First,
+            html: SafeHtml::trusted(value.to_string()),
         }
     }
 
@@ -1064,102 +1040,64 @@ where
         T: ToString,
     {
         let key = key.to_string();
-        Effect::Put {
+        Effect::Patch {
             target: ResourceRef {
                 resource: self.id,
                 scope: Some(ScopeKey::KeyValue(key)),
             },
-            payload: Payload::text(value),
+            mode: PatchMode::Morph,
+            html: SafeHtml::trusted(value.to_string()),
         }
     }
 
     pub fn append_html(self, key: K, value: impl Into<SafeHtml>) -> Effect {
         Effect::Insert {
-            target: ResourceRef::unscoped(self.id),
-            key: key.to_string(),
-            payload: Payload::html(value.into()),
+            target: ResourceRef::scoped(self.id, ScopeKey::KeyValue(key.to_string())),
+            position: InsertPosition::Last,
+            html: value.into(),
         }
     }
 
     pub fn prepend_html(self, key: K, value: impl Into<SafeHtml>) -> Effect {
-        Effect::Prepend {
-            target: ResourceRef::unscoped(self.id),
-            key: key.to_string(),
-            payload: Payload::html(value.into()),
+        Effect::Insert {
+            target: ResourceRef::scoped(self.id, ScopeKey::KeyValue(key.to_string())),
+            position: InsertPosition::First,
+            html: value.into(),
         }
     }
 
     pub fn replace_html(self, key: K, value: impl Into<SafeHtml>) -> Effect {
         let key = key.to_string();
-        Effect::Put {
+        Effect::Patch {
             target: ResourceRef {
                 resource: self.id,
                 scope: Some(ScopeKey::KeyValue(key)),
             },
-            payload: Payload::html(value.into()),
+            mode: PatchMode::Morph,
+            html: value.into(),
         }
     }
 
     pub fn remove(self, key: K) -> Effect {
         Effect::Remove {
-            target: ResourceRef::unscoped(self.id),
-            key: Some(key.to_string()),
+            target: ResourceRef::scoped(self.id, ScopeKey::KeyValue(key.to_string())),
         }
     }
 
     pub fn move_before(self, key: K, before: K) -> Effect {
         Effect::Move {
-            target: ResourceRef::unscoped(self.id),
-            key: key.to_string(),
-            before: Some(before.to_string()),
+            target: ResourceRef::scoped(self.id, ScopeKey::KeyValue(key.to_string())),
+            position: MovePosition::Before(ResourceRef::scoped(
+                self.id,
+                ScopeKey::KeyValue(before.to_string()),
+            )),
         }
     }
 
     pub fn move_to_end(self, key: K) -> Effect {
         Effect::Move {
-            target: ResourceRef::unscoped(self.id),
-            key: key.to_string(),
-            before: None,
-        }
-    }
-}
-
-#[derive(Debug, Eq, PartialEq, Hash)]
-pub struct Atom<T> {
-    id: ResourceId,
-    _marker: PhantomData<fn() -> T>,
-}
-
-impl<T> Clone for Atom<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T> Copy for Atom<T> {}
-
-impl<T> core::fmt::Display for Atom<T> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        self.id.id.fmt(f)
-    }
-}
-
-impl<T> Atom<T> {
-    pub const fn new(id: u32) -> Self {
-        Self {
-            id: ResourceId::new(ResourceKind::Atom, id),
-            _marker: PhantomData,
-        }
-    }
-
-    pub const fn id(self) -> ResourceId {
-        self.id
-    }
-
-    pub fn set(self, value: impl ToString) -> Effect {
-        Effect::Put {
-            target: ResourceRef::unscoped(self.id),
-            payload: Payload::text(value),
+            target: ResourceRef::scoped(self.id, ScopeKey::KeyValue(key.to_string())),
+            position: MovePosition::Last,
         }
     }
 }
@@ -1290,48 +1228,18 @@ impl<T> Form<T> {
         ResourceRef::scoped(self.id, ScopeKey::Field(name.into()))
     }
 
-    pub fn reset(self) -> Effect {
-        Effect::Emit {
-            name: String::from("hemx:form-reset"),
-            payload: self.id.id.to_string(),
-        }
-    }
-
-    pub fn clear(self) -> Effect {
-        self.reset()
-    }
-
     pub fn clear_field(self, field: impl Into<String>) -> Effect {
-        Effect::Put {
+        Effect::Patch {
             target: self.field(field),
-            payload: Payload::text(""),
-        }
-    }
-
-    pub fn error(self, field: impl Into<String>, message: impl ToString) -> Effect {
-        let field = field.into();
-        let message = message.to_string();
-        let mut payload = self.id.id.to_string();
-        payload.push('\u{1f}');
-        payload.push_str(&field);
-        payload.push('\u{1f}');
-        payload.push_str(&message);
-        Effect::Emit {
-            name: String::from("hemx:form-error"),
-            payload,
+            mode: PatchMode::Morph,
+            html: SafeHtml::trusted(""),
         }
     }
 
     pub fn focus(self, field: impl Into<String>) -> Effect {
         Effect::Focus {
             target: self.field(field),
-        }
-    }
-
-    pub fn disable_while_pending(self) -> Effect {
-        Effect::Emit {
-            name: String::from("hemx:form-disable-while-pending"),
-            payload: self.id.id.to_string(),
+            prevent_scroll: false,
         }
     }
 }
@@ -1341,35 +1249,29 @@ pub fn navigate(url: impl Into<String>) -> Effect {
 }
 
 pub fn push(url: impl Into<String>) -> Effect {
-    Effect::Navigate {
+    Effect::Visit {
         url: url.into(),
-        mode: NavigateMode::Push,
-        scroll: ScrollBehavior::Top,
-        title: None,
+        history: HistoryMode::Push,
     }
 }
 
 pub fn replace(url: impl Into<String>) -> Effect {
-    Effect::Navigate {
+    Effect::Visit {
         url: url.into(),
-        mode: NavigateMode::Replace,
-        scroll: ScrollBehavior::Top,
-        title: None,
+        history: HistoryMode::Replace,
     }
 }
 
 pub fn redirect(url: impl Into<String>) -> Effect {
-    Effect::Navigate {
+    Effect::Visit {
         url: url.into(),
-        mode: NavigateMode::Redirect,
-        scroll: ScrollBehavior::Top,
-        title: None,
+        history: HistoryMode::Replace,
     }
 }
 
 pub fn event(name: impl Into<String>, payload: impl Into<String>) -> Effect {
-    Effect::Emit {
-        name: name.into(),
-        payload: payload.into(),
+    Effect::Dispatch {
+        event: name.into(),
+        payload: payload.into().into_bytes(),
     }
 }

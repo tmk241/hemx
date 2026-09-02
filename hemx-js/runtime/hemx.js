@@ -1,10 +1,10 @@
 (() => {
   const ROOT = "data-hemx-root";
-  const HID = "data-hid";
-  const SID = "data-sid";
+  const ACTION = "data-hemx-action";
+  const RESOURCE = "data-hemx-resource";
   const runtimeAbiVersion = 1;
-  const FINGERPRINT = "data-hemx-fp";
-  const STATE = "data-hemx-st";
+  const BUILD = "data-hemx-build";
+  const ISLAND = "data-hemx-island";
   const pending = new WeakMap();
   const queues = new WeakMap();
   const timers = new WeakMap();
@@ -17,7 +17,7 @@
   const disabledStates = new WeakMap();
   const sseSources = new WeakMap();
   const webSockets = new WeakMap();
-  const atomStores = new WeakMap();
+  const boundRoots = new WeakSet();
   const dragKeys = new WeakMap();
   const activeRequests = new Set();
   const REQUEST_TIMEOUT_MS = 10_000;
@@ -54,8 +54,8 @@
 
   function formHandleId(form) {
     if (!form) return null;
-    const holder = form.hasAttribute(HID) ? form : firstElement(form, (el) => el.hasAttribute(HID));
-    const raw = holder && holder.getAttribute(HID);
+    const holder = form.hasAttribute(ACTION) ? form : firstElement(form, (el) => el.hasAttribute(ACTION));
+    const raw = holder && holder.getAttribute(ACTION);
     return raw && /^\d+$/.test(raw) ? raw : null;
   }
 
@@ -68,7 +68,7 @@
   }
 
   function handleId(el) {
-    const raw = el && el.getAttribute(HID);
+    const raw = el && el.getAttribute(ACTION);
     return raw && /^\d+$/.test(raw) ? raw : null;
   }
 
@@ -173,7 +173,7 @@
     const dragKey = eventName === "drop" && dragKeys.get(rootOf(el));
     if (dragKey && !data.has("work_id")) data.set("work_id", dragKey);
     for (const { name, value } of Array.from(el.attributes || [])) {
-      if (name.startsWith("data-") && !name.startsWith("data-hemx-") && name !== HID && name !== SID) {
+      if (name.startsWith("data-") && !name.startsWith("data-hemx-") && name !== ACTION && name !== RESOURCE) {
         data.set(name.slice(5).replace(/-/g, "_"), value);
       }
     }
@@ -356,17 +356,25 @@
 
   async function navigateUrl(href, root, mode = "replace") {
     if (mode === "push") savePage(root);
-    const response = await fetch(href, {
-      headers: { "X-HEMX-Partial": "1", "Accept": "text/html" },
-      credentials: "same-origin",
-    });
-    if (!await applyResponse(response, root)) {
-      if (mode === "none") location.reload();
-      else location.href = href;
-      return;
+    try {
+      const response = await fetch(href, {
+        headers: { "X-HEMX-Partial": "1", "Accept": "text/html" },
+        credentials: "same-origin",
+      });
+      if (!response.ok || !await applyResponse(response, root)) {
+        fallbackNavigation(href, mode);
+        return;
+      }
+      if (mode === "push") history.pushState({ hemx: true }, "", href);
+      else if (mode === "replace") history.replaceState({ hemx: true }, "", href);
+    } catch (_) {
+      fallbackNavigation(href, mode);
     }
-    if (mode === "push") history.pushState({ hemx: true }, "", href);
-    else if (mode === "replace") history.replaceState({ hemx: true }, "", href);
+  }
+
+  function fallbackNavigation(href, mode) {
+    if (mode === "none") location.reload();
+    else location.href = href;
   }
 
   async function applyResponse(response, root) {
@@ -389,7 +397,7 @@
 
   function compatibleFingerprint(response, root) {
     const received = response.headers.get("x-hemx-fingerprint");
-    const expected = root && root.getAttribute(FINGERPRINT);
+    const expected = root && root.getAttribute(BUILD);
     return !received || !expected || received === expected;
   }
 
@@ -404,87 +412,75 @@
       }
       throw error;
     }
-    const expected = root && root.getAttribute(FINGERPRINT);
+    const expected = root && root.getAttribute(BUILD);
     if (expected && String(batch.fingerprint) !== expected) {
       location.reload();
       return;
     }
     const scope = root || document;
-    const missingTarget = batch.ops.map((op) => canApplyOp(scope, op)).find(Boolean);
-    if (missingTarget) {
-      missing(scope, missingTarget);
-      return;
+    for (const op of batch.ops) {
+      if (!applyOp(scope, op)) return;
     }
-    for (const op of batch.ops) applyOp(scope, op);
     bindPolling(scope);
     bindRevealed(scope);
   }
 
-  function canApplyOp(scope, op) {
-    if (op.kind === "put" && isAtom(op.target)) return null;
-    if (op.kind === "put" || op.kind === "focus") return targetFor(scope, op.target) ? null : op.target;
-    if (op.kind === "insert" || op.kind === "prepend") return targetFor(scope, op.target) ? null : op.target;
-    if (op.kind === "remove") return (op.key ? keyedTarget(scope, op.target.resource.id, op.key) : targetFor(scope, op.target)) ? null : op.target;
-    if (op.kind === "move") return targetFor(scope, op.target) && keyedTarget(scope, op.target.resource.id, op.key) ? null : op.target;
-    if (op.kind === "navigate" && op.scroll && op.scroll.kind === "element") return targetFor(scope, op.scroll.target) ? null : op.scroll.target;
+  function positionTarget(scope, position) {
+    if (position.kind === "before" || position.kind === "after") return targetFor(scope, position.target);
     return null;
   }
 
   function applyOp(scope, op) {
-    if (op.kind === "put") {
-      if (isAtom(op.target)) {
-        atomStore(scope).set(String(op.target.resource.id), op.payload.value);
-        forEachElement(scope, (element) => {
-          if (element.getAttribute("data-aid") === String(op.target.resource.id)) {
-            putPayload(element, op.payload);
-          }
-        });
-        return true;
+    if (op.kind === "patch") {
+      const target = targetFor(scope, op.target);
+      if (!target) return missing(scope, op.target);
+      if (op.mode === "replace") {
+        const nodes = fragmentNodes({ kind: "html", value: op.html }, null, null);
+        preserveIslands(target, nodes);
+        target.replaceWith(...nodes);
+      } else morphChildren(target, op.html);
+    } else if (op.kind === "insert") {
+      const target = targetFor(scope, op.target);
+      if (!target) return missing(scope, op.target);
+      if (op.position === "first") target.prepend(...fragmentNodes({ kind: "html", value: op.html }, null, null));
+      else if (op.position === "last") target.append(...fragmentNodes({ kind: "html", value: op.html }, null, null));
+      else {
+        const anchor = positionTarget(scope, op.position);
+        if (!anchor) return missing(scope, op.position.target);
+        const nodes = fragmentNodes({ kind: "html", value: op.html }, null, null);
+        for (const node of nodes) anchor.parentNode.insertBefore(node, op.position.kind === "before" ? anchor : anchor.nextSibling);
       }
-      const target = targetFor(scope, op.target);
-      if (!target) return missing(scope, op.target);
-      if (op.target.scope && op.target.scope.kind === "key" && op.payload.kind === "html") replacePayload(target, op.payload, op.target.scope.value, op.target.resource.id);
-      else putPayload(target, op.payload);
-    } else if (op.kind === "insert" || op.kind === "prepend") {
-      const target = targetFor(scope, op.target);
-      if (!target) return missing(scope, op.target);
-      const nodes = fragmentNodes(op.payload, op.key, op.target.resource.id);
-      target[op.kind === "prepend" ? "prepend" : "append"](...nodes);
     } else if (op.kind === "remove") {
-      const target = op.key ? keyedTarget(scope, op.target.resource.id, op.key) : targetFor(scope, op.target);
+      const target = targetFor(scope, op.target);
       if (!target) return missing(scope, op.target);
       target.remove();
     } else if (op.kind === "move") {
       const target = targetFor(scope, op.target);
-      const item = keyedTarget(scope, op.target.resource.id, op.key);
-      if (!target || !item) return missing(scope, op.target);
-      const before = op.before && keyedTarget(scope, op.target.resource.id, op.before);
-      target.insertBefore(item, before || null);
+      if (!target) return missing(scope, op.target);
+      if (op.position === "first") target.parentNode.prepend(target);
+      else if (op.position === "last") target.parentNode.append(target);
+      else {
+        const anchor = positionTarget(scope, op.position);
+        if (!anchor) return missing(scope, op.position.target);
+        anchor.parentNode.insertBefore(target, op.position.kind === "before" ? anchor : anchor.nextSibling);
+      }
     } else if (op.kind === "focus") {
       const target = targetFor(scope, op.target);
-      if (target && target.focus) target.focus();
+      if (target && target.focus) target.focus({ preventScroll: op.preventScroll });
       else return missing(scope, op.target);
-    } else if (op.kind === "navigate") {
-      if (op.mode === "redirect") location.href = op.url;
-      else {
-        history[op.mode === "replace" ? "replaceState" : "pushState"]({ hemx: true }, "", op.url);
-        if (op.scroll === "top") scrollTo(0, 0);
-        else if (op.scroll && op.scroll.kind === "element") {
-          const target = targetFor(scope, op.scroll.target);
-          if (target) target.scrollIntoView();
-        }
-        if (op.title) document.title = op.title;
-      }
-    } else if (op.kind === "emit") {
-      const payload = op.payload;
-      handleRuntimeEvent(scope, op.name, payload);
-      emit(scope, op.name, payload);
+    } else if (op.kind === "scroll") {
+      const target = targetFor(scope, op.target);
+      if (!target) return missing(scope, op.target);
+      target.scrollIntoView({ block: op.block, behavior: op.behavior });
+    } else if (op.kind === "visit") {
+      navigateUrl(op.url, scope, op.history).catch(() => { location.href = op.url; });
+    } else if (op.kind === "dispatch") {
+      emit(scope, op.event, op.payload);
     }
     return true;
   }
 
   function targetFor(scope, ref) {
-    if (isAtom(ref)) return null;
     if (ref.scope && ref.scope.kind === "key") return keyedTarget(scope, ref.resource.id, ref.scope.value);
     if (ref.scope && ref.scope.kind === "field") return fieldTarget(scope, ref.resource.id, ref.scope.value);
     return generatedTarget(scope, ref.resource.id);
@@ -495,6 +491,7 @@
     for (let node = scope && scope.firstElementChild; node; node = node.nextElementSibling) stack.push(node);
     while (stack.length) {
       const node = stack.shift();
+      if (node.hasAttribute && (node.hasAttribute(ROOT) || node.hasAttribute(ISLAND))) continue;
       if (predicate(node)) return node;
       for (let child = node.firstElementChild; child; child = child.nextElementSibling) stack.push(child);
     }
@@ -506,11 +503,11 @@
   }
 
   function generatedResource(el, id) {
-    return attrEquals(el, "data-sid", id) || attrEquals(el, "data-slot-id", id);
+    return attrEquals(el, RESOURCE, id);
   }
 
   function generatedForm(el, id) {
-    return attrEquals(el, "data-fid", id) || attrEquals(el, "data-form-id", id);
+    return generatedResource(el, id);
   }
 
   function generatedTarget(scope, id) {
@@ -542,26 +539,8 @@
     return isInputControl(el) || (el && el.tagName === "BUTTON");
   }
 
-  function isAtom(ref) {
-    return ref && ref.resource && ref.resource.kind === "atom";
-  }
-
-  function atomStore(root) {
-    const owner = root && root.nodeType === 1 ? root : document.documentElement;
-    let store = atomStores.get(owner);
-    if (!store) {
-      store = new Map();
-      atomStores.set(owner, store);
-    }
-    return store;
-  }
-
-  function atomValue(root, id) {
-    return atomStore(rootOf(root) || root || roots()[0]).get(String(id));
-  }
-
   function keyedTarget(scope, id, key) {
-    return firstElement(scope, (el) => attrEquals(el, "data-key", key) && withinGeneratedResource(el, scope, id));
+    return firstElement(scope, (el) => attrEquals(el, "data-hemx-key", key) && withinGeneratedResource(el, scope, id));
   }
 
   function fieldTarget(scope, id, field) {
@@ -584,6 +563,37 @@
     else target.textContent = payload.value;
   }
 
+  function morphChildren(target, html) {
+    const nodes = fragmentNodes({ kind: "html", value: html }, null, null);
+    preserveIslands(target, nodes);
+    target.replaceChildren(...nodes);
+  }
+
+  function preserveIslands(current, incomingNodes) {
+    const islands = new Map();
+    islandElements(current).forEach((island) => islands.set(island.getAttribute(ISLAND), island));
+    for (const node of incomingNodes) {
+      islandElements(node).forEach((island) => {
+        const preserved = islands.get(island.getAttribute(ISLAND));
+        if (preserved) island.replaceWith(preserved);
+      });
+    }
+  }
+
+  function islandElements(root) {
+    const islands = [];
+    const queue = [root];
+    while (queue.length) {
+      const node = queue.shift();
+      if (node.nodeType === 1 && node.hasAttribute(ISLAND)) {
+        islands.push(node);
+        continue;
+      }
+      for (let child = node.firstElementChild; child; child = child.nextElementSibling) queue.push(child);
+    }
+    return islands;
+  }
+
   function replacePayload(target, payload, key, resourceId) {
     const nodes = fragmentNodes(payload, key, resourceId);
     if (nodes.length) target.replaceWith(...nodes);
@@ -596,31 +606,9 @@
     else template.textContent = payload.value;
     const nodes = Array.from(template.content.childNodes);
     const firstElement = nodes.find((node) => node.nodeType === 1);
-    if (firstElement && key != null && !firstElement.hasAttribute("data-key")) firstElement.setAttribute("data-key", key);
-    if (firstElement && resourceId != null && !firstElement.hasAttribute("data-sid")) firstElement.setAttribute("data-sid", resourceId);
+    if (firstElement && key != null && !firstElement.hasAttribute("data-hemx-key")) firstElement.setAttribute("data-hemx-key", key);
+    if (firstElement && resourceId != null && !firstElement.hasAttribute("data-hemx-resource")) firstElement.setAttribute("data-hemx-resource", resourceId);
     return nodes;
-  }
-
-  function handleRuntimeEvent(scope, name, payload) {
-    if (name === "hemx:form-reset") {
-      const form = generatedFormTarget(scope, payload);
-      if (form && form.reset) {
-        form.reset();
-        forEachElement(form, (el) => {
-          if (el.hasAttribute("data-hemx-error-for")) {
-            if (isInputControl(el)) el.setCustomValidity("");
-            else el.textContent = "";
-          }
-        });
-      }
-    } else if (name === "hemx:form-error") {
-      const [id, field, message] = String(payload).split("\u001f");
-      const target = formErrorTarget(scope, id, field);
-      if (target) putFormError(target, message || "");
-    } else if (name === "hemx:form-disable-while-pending") {
-      const form = generatedFormTarget(scope, payload);
-      if (form) form.setAttribute("data-hemx-disable-while-pending", "");
-    }
   }
 
   function missing(root, target) {
@@ -652,7 +640,7 @@
   function replaceLoweredSlots(scope, doc) {
     let changed = false;
     forEachElement(doc.body || doc, (source) => {
-      const id = source.getAttribute("data-sid") || source.getAttribute("data-slot-id");
+      const id = source.getAttribute(RESOURCE);
       if (!id) return;
       const target = generatedTarget(scope, id);
       if (target) {
@@ -704,18 +692,21 @@
   }
 
   function bindRoot(root) {
+    if (boundRoots.has(root)) return;
+    boundRoots.add(root);
     ["click", "submit", "input", "change", "keydown", "dragstart", "dragover", "drop"].forEach((name) => {
       root.addEventListener(name, (event) => {
+        if (rootOf(event.target) !== root) return;
         if (name === "dragstart") {
-          const item = closestInRoot(event.target, root, (el) => el.hasAttribute("data-key"));
+          const item = closestInRoot(event.target, root, (el) => el.hasAttribute("data-hemx-key"));
           if (item) {
-            dragKeys.set(root, item.getAttribute("data-key"));
-            if (event.dataTransfer) event.dataTransfer.setData("text/plain", item.getAttribute("data-key"));
+            dragKeys.set(root, item.getAttribute("data-hemx-key"));
+            if (event.dataTransfer) event.dataTransfer.setData("text/plain", item.getAttribute("data-hemx-key"));
           }
           return;
         }
         if (name === "dragover") {
-          const drop = closestInRoot(event.target, root, (el) => el.hasAttribute(HID) && el.getAttribute("data-hemx-on") === "drop");
+          const drop = closestInRoot(event.target, root, (el) => el.hasAttribute(ACTION) && el.getAttribute("data-hemx-on") === "drop");
           if (drop) event.preventDefault();
           return;
         }
@@ -729,7 +720,7 @@
           return;
         }
         if (name === "click") {
-          const direct = closestInRoot(event.target, root, (el) => el.hasAttribute(HID));
+          const direct = closestInRoot(event.target, root, (el) => el.hasAttribute(ACTION));
           if (direct && handlesEvent(direct, "click")) {
             event.preventDefault();
             schedule(direct, name);
@@ -750,7 +741,7 @@
           }
         }
         let el = closestInRoot(event.target, root, (node) =>
-          node.hasAttribute(HID) ||
+          node.hasAttribute(ACTION) ||
           (node.tagName === "FORM" && (pageFormHistoryMode(event.submitter || node, node) || boostRoot(node)))
         );
         if (name === "submit" && !el && event.target && event.target.tagName === "FORM" && (formHandleId(event.target) || pageFormHistoryMode(event.submitter || event.target, event.target))) el = event.target;
@@ -759,19 +750,14 @@
         schedule(el, name, event.submitter || el);
       });
     });
-    bindPolling(root);
-    bindRevealed(root);
   }
 
   function schedule(el, eventName, source = el) {
     const debounce = duration(el.getAttribute("data-hemx-debounce"));
-    const delay = duration(el.getAttribute("data-hemx-delay"));
     const throttle = duration(el.getAttribute("data-hemx-throttle"));
     if (debounce) {
       clearTimeout(timers.get(el));
       timers.set(el, setTimeout(() => send(el, eventName, source), debounce));
-    } else if (delay) {
-      setTimeout(() => send(el, eventName, source), delay);
     } else if (throttle) {
       if (timers.get(el)) return;
       send(el, eventName, source).finally(() => setTimeout(() => timers.delete(el), throttle));
@@ -782,6 +768,7 @@
 
   function bindPolling(root) {
     forEachElement(root, (el) => {
+      if (rootOf(el) !== root) return;
       if ((!el.hasAttribute("data-hemx-every") && !el.hasAttribute("data-hemx-interval")) || everyTimers.has(el)) return;
       const eventName = el.hasAttribute("data-hemx-interval") ? "interval" : "every";
       const ms = duration(el.getAttribute("data-hemx-interval") || el.getAttribute("data-hemx-every"));
@@ -804,6 +791,7 @@
   function bindRevealed(root) {
     let observers = revealObservers.get(root);
     forEachElement(root, (el) => {
+      if (rootOf(el) !== root) return;
       if (!el.hasAttribute("data-hemx-revealed") || revealed.has(el)) return;
       if (typeof IntersectionObserver === "undefined") {
         revealed.add(el);
@@ -894,26 +882,6 @@
     return Number(match[1]) * (match[2] === "s" ? 1000 : 1);
   }
 
-  function bootstrapState(root) {
-    const encoded = root.getAttribute(STATE);
-    if (!encoded) return;
-    try {
-      const store = atomStore(root);
-      for (const atom of decodeAtomState(encoded)) store.set(String(atom.id), atom.bytes);
-    } catch (error) {
-      atomStores.delete(root);
-      emit(root, "hemx:state-error", String(error));
-    }
-  }
-
-  function decodeAtomState(encoded) {
-    const bytes = base64UrlBytes(encoded);
-    const d = postcardDecoder(bytes);
-    const atoms = d.vec(() => ({ id: d.varint(), bytes: d.bytes() }));
-    if (!d.done()) throw new Error("trailing hemx state bytes");
-    return atoms;
-  }
-
   function base64UrlBytes(encoded) {
     if (typeof encoded !== "string" || encoded.length > Math.ceil(MAX_WIRE_BYTES * 4 / 3) + 4) {
       throw new Error(`encoded hemx state exceeds ${MAX_WIRE_BYTES} bytes`);
@@ -932,37 +900,6 @@
       throw new Error(`${field} length ${value} exceeds ${maximum}`);
     }
     return value;
-  }
-
-  function postcardDecoder(bytes) {
-    if (bytes.length > MAX_WIRE_BYTES) throw new Error(`hemx state exceeds ${MAX_WIRE_BYTES} bytes`);
-    let offset = 0;
-    const need = (len) => {
-      boundedLength(len, bytes.length - offset, "hemx state field");
-      const end = offset + len;
-      if (end > bytes.length) throw new Error("truncated hemx state");
-      const slice = bytes.subarray(offset, end);
-      offset = end;
-      return slice;
-    };
-    const varint = () => {
-      let value = 0;
-      for (let index = 0; index < 5; index += 1) {
-        const byte = need(1)[0];
-        if (index === 4 && byte > 0x0f) throw new Error("oversized hemx state varint");
-        value += (byte & 0x7f) * (2 ** (index * 7));
-        if ((byte & 0x80) === 0) return value >>> 0;
-      }
-      throw new Error("oversized hemx state varint");
-    };
-    const bytesField = () => need(boundedLength(varint(), MAX_WIRE_FIELD_BYTES, "hemx state bytes"));
-    const vec = (read) => {
-      const length = boundedLength(varint(), MAX_WIRE_ITEMS, "hemx state vector");
-      const values = [];
-      for (let index = 0; index < length; index += 1) values.push(read());
-      return values;
-    };
-    return { varint, bytes: bytesField, vec, done: () => offset === bytes.length };
   }
 
   function decoder(buffer) {
@@ -990,6 +927,7 @@
     const str = () => new TextDecoder("utf-8", { fatal: true }).decode(
       need(boundedLength(u32(), MAX_WIRE_FIELD_BYTES, "hemx string")),
     );
+    const bytesField = () => need(boundedLength(u32(), MAX_WIRE_FIELD_BYTES, "hemx bytes"));
     const enumValue = (values, field) => {
       const discriminant = u8();
       if (discriminant >= values.length) throw new Error(`unknown ${field} ${discriminant}`);
@@ -1001,7 +939,13 @@
       if (discriminant === 1) return read();
       throw new Error(`unknown hemx option ${discriminant}`);
     };
-    const resource = () => ({ kind: enumValue(["slot", "atom", "handle", "form"], "hemx resource"), id: u32() });
+    const resource = () => {
+      const kind = u8();
+      if (kind === 0) return { kind: "slot", id: u32() };
+      if (kind === 2) return { kind: "handle", id: u32() };
+      if (kind === 3) return { kind: "form", id: u32() };
+      throw new Error(`unknown hemx resource ${kind}`);
+    };
     const scope = () => {
       const kind = u8();
       if (kind === 0) return null;
@@ -1010,24 +954,24 @@
       throw new Error(`unknown hemx scope ${kind}`);
     };
     const ref = () => ({ resource: resource(), scope: scope() });
-    const payload = () => ({ kind: enumValue(["text", "html"], "hemx payload"), value: str() });
-    const scroll = () => {
+    const position = () => {
       const kind = u8();
-      if (kind === 0) return "preserve";
-      if (kind === 1) return "top";
-      if (kind === 2) return { kind: "element", target: ref() };
-      throw new Error(`unknown hemx scroll behavior ${kind}`);
+      if (kind === 0) return "first";
+      if (kind === 1) return "last";
+      if (kind === 2) return { kind: "before", target: ref() };
+      if (kind === 3) return { kind: "after", target: ref() };
+      throw new Error(`unknown hemx position ${kind}`);
     };
     const effect = () => {
       const kind = u8();
-      if (kind === 0) return { kind: "put", target: ref(), payload: payload() };
-      if (kind === 1) return { kind: "insert", target: ref(), key: str(), payload: payload() };
-      if (kind === 2) return { kind: "prepend", target: ref(), key: str(), payload: payload() };
-      if (kind === 3) return { kind: "remove", target: ref(), key: option(str) };
-      if (kind === 4) return { kind: "move", target: ref(), key: str(), before: option(str) };
-      if (kind === 5) return { kind: "focus", target: ref() };
-      if (kind === 6) return { kind: "navigate", url: str(), mode: enumValue(["push", "replace", "redirect"], "hemx navigation mode"), scroll: scroll(), title: option(str) };
-      if (kind === 7) return { kind: "emit", name: str(), payload: str() };
+      if (kind === 0) return { kind: "patch", target: ref(), mode: enumValue(["morph", "replace"], "hemx patch mode"), html: str() };
+      if (kind === 1) return { kind: "insert", target: ref(), position: position(), html: str() };
+      if (kind === 2) return { kind: "remove", target: ref() };
+      if (kind === 3) return { kind: "move", target: ref(), position: position() };
+      if (kind === 4) return { kind: "focus", target: ref(), preventScroll: u8() !== 0 };
+      if (kind === 5) return { kind: "scroll", target: ref(), block: enumValue(["start", "center", "end", "nearest"], "hemx scroll block"), behavior: enumValue(["auto", "instant", "smooth"], "hemx scroll behavior") };
+      if (kind === 6) return { kind: "visit", url: str(), history: enumValue(["push", "replace"], "hemx history mode") };
+      if (kind === 7) return { kind: "dispatch", event: str(), payload: bytesField() };
       throw new Error(`unknown hemx effect ${kind}`);
     };
     const vec = (read) => {
@@ -1076,6 +1020,17 @@
     }
   }
 
+  function cleanupRemovedFragment(node) {
+    if (node.hasAttribute(ROOT)) cleanupRemovedRoot(node);
+    descendantRoots(node).forEach(cleanupRemovedRoot);
+    if (node.hasAttribute("data-hemx-every") || node.hasAttribute("data-hemx-interval")) stopPolling(node);
+    stopDescendantPolling(node);
+    revealed.delete(node);
+    forEachElement(node, (element) => {
+      if (element.hasAttribute("data-hemx-revealed")) revealed.delete(element);
+    });
+  }
+
   function cleanupRemovedRoot(root) {
     const source = sseSources.get(root);
     if (source) source.close();
@@ -1087,6 +1042,7 @@
     if (observers) observers.forEach((observer) => observer.disconnect());
     revealObservers.delete(root);
     stopDescendantPolling(root);
+    boundRoots.delete(root);
   }
 
   function rebindRevealed(resetDispatched) {
@@ -1107,42 +1063,36 @@
     if (event.persisted) rebindRevealed(true);
   }
 
+  function bindEnhancedRoot(root) {
+    root.setAttribute("data-hemx-request-timeout-ms", String(REQUEST_TIMEOUT_MS));
+    bindAdapter(root, "events", () => bindRoot(root));
+    bindAdapter(root, "sse", () => bindSse(root));
+    bindAdapter(root, "websocket", () => bindWebSocket(root));
+    bindAdapter(root, "polling", () => bindPolling(root));
+    bindAdapter(root, "revealed", () => bindRevealed(root));
+  }
+
+  function bindAdapter(root, name, bind) {
+    try {
+      bind();
+    } catch (error) {
+      showError(root, error);
+      emit(root, `hemx:${name}-error`, String(error));
+    }
+  }
+
   function start() {
-    roots().forEach((root) => {
-      root.setAttribute("data-hemx-request-timeout-ms", String(REQUEST_TIMEOUT_MS));
-      try {
-        bootstrapState(root);
-      } catch (error) {
-        emit(root, "hemx:state-error", String(error));
-      }
-      try {
-        bindRoot(root);
-      } catch (error) {
-        emit(root, "hemx:bind-error", String(error));
-      }
-      try {
-        bindSse(root);
-      } catch (error) {
-        emit(root, "hemx:sse-error", String(error));
-      }
-      try {
-        bindWebSocket(root);
-      } catch (error) {
-        showError(root, error);
-        emit(root, "hemx:ws-error", String(error));
-      }
-    });
+    roots().forEach(bindEnhancedRoot);
     new MutationObserver((records) => {
       records.forEach((record) => {
         record.removedNodes.forEach((node) => {
           if (!(node instanceof Element)) return;
-          if (node.hasAttribute(ROOT)) cleanupRemovedRoot(node);
-          descendantRoots(node).forEach(cleanupRemovedRoot);
+          cleanupRemovedFragment(node);
         });
         record.addedNodes.forEach((node) => {
           if (!(node instanceof Element)) return;
-          if (node.hasAttribute(ROOT)) bindRoot(node);
-          descendantRoots(node).forEach(bindRoot);
+          if (node.hasAttribute(ROOT)) bindEnhancedRoot(node);
+          descendantRoots(node).forEach(bindEnhancedRoot);
           const owner = rootOf(node.parentElement);
           if (owner) {
             bindPolling(owner);
@@ -1176,8 +1126,6 @@
     applyHtml,
     applyBatch,
     decodeBatch,
-    atomValue,
-    decodeAtomState,
   });
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);

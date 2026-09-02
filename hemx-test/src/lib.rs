@@ -9,8 +9,8 @@ pub use html::{HtmlElement, HtmlInspectionError, HtmlInspector, HtmlSelection};
 pub use process::{ProcessError, ProcessFailure, TestProcess, TestProcessBuilder};
 
 use hemx_core::{
-    Atom, BuildFingerprint, Effect, EffectBatch, Form, GeneratedTarget, IntoEffect, KeyedSlot,
-    NavigateMode, Payload, ResourceId, ResourceRef, ScopeKey, Slot,
+    BuildFingerprint, Effect, EffectBatch, Form, GeneratedTarget, IntoEffect, KeyedSlot,
+    ResourceId, ResourceRef, ScopeKey, Slot,
 };
 use std::future::Future;
 
@@ -206,10 +206,8 @@ impl EffectInspector {
         self.batch.ops.iter().any(|op| {
             matches!(
                 op,
-                Effect::Put {
-                    target,
-                    payload: Payload::Text(text),
-                } if target.resource == resource && text.contains(needle)
+                Effect::Patch { target, html, .. }
+                    if target.resource == resource && html.as_str().contains(needle)
             )
         })
     }
@@ -220,10 +218,8 @@ impl EffectInspector {
         self.batch.ops.iter().any(|op| {
             matches!(
                 op,
-                Effect::Put {
-                    target,
-                    payload: Payload::Html(_),
-                } if target.resource == resource
+                Effect::Patch { target, .. } | Effect::Insert { target, .. }
+                    if target.resource == resource
             )
         })
     }
@@ -251,10 +247,8 @@ impl EffectInspector {
         self.batch.ops.iter().any(|op| {
             matches!(
                 op,
-                Effect::Put {
-                    target,
-                    payload: Payload::Html(html),
-                } if target.resource == resource && html.contains(needle)
+                Effect::Patch { target, html, .. } | Effect::Insert { target, html, .. }
+                    if target.resource == resource && html.as_str().contains(needle)
             )
         })
     }
@@ -305,18 +299,8 @@ impl EffectInspector {
         let html_effects = target_effects
             .iter()
             .filter_map(|effect| match effect {
-                Effect::Put {
-                    payload: Payload::Html(html),
-                    ..
-                } => Some((html.as_str(), "Put")),
-                Effect::Insert {
-                    payload: Payload::Html(html),
-                    ..
-                } => Some((html.as_str(), "Insert")),
-                Effect::Prepend {
-                    payload: Payload::Html(html),
-                    ..
-                } => Some((html.as_str(), "Prepend")),
+                Effect::Patch { html, .. } => Some((html.as_str(), "Patch")),
+                Effect::Insert { html, .. } => Some((html.as_str(), "Insert")),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -352,10 +336,8 @@ impl EffectInspector {
         self.batch.ops.iter().any(|op| {
             matches!(
                 op,
-                Effect::Put {
-                    target,
-                    payload: Payload::Html(html),
-                } if target.resource == resource && target.scope == scope && html.contains(needle)
+                Effect::Patch { target, html, .. }
+                    if target.resource == resource && target.scope == scope && html.as_str().contains(needle)
             )
         })
     }
@@ -368,15 +350,14 @@ impl EffectInspector {
         needle: &str,
     ) -> bool {
         let resource = target.__hemx_resource_id();
-        let key = key.to_string();
+        let key_marker = format!("data-hemx-key=\"{}\"", key.to_string());
         self.batch.ops.iter().any(|op| {
             matches!(
                 op,
-                Effect::Insert {
-                    target,
-                    key: actual_key,
-                    payload: Payload::Html(html),
-                } if target.resource == resource && actual_key == &key && html.contains(needle)
+                Effect::Insert { target, html, .. }
+                    if target.resource == resource
+                        && html.as_str().contains(&key_marker)
+                        && html.as_str().contains(needle)
             )
         })
     }
@@ -388,10 +369,8 @@ impl EffectInspector {
         self.batch.ops.iter().any(|op| {
             matches!(
                 op,
-                Effect::Remove {
-                    target,
-                    key: Some(actual_key),
-                } if target.resource == resource && actual_key == &key
+                Effect::Remove { target }
+                    if target.resource == resource && target.scope == Some(ScopeKey::KeyValue(key.clone()))
             )
         })
     }
@@ -401,11 +380,7 @@ impl EffectInspector {
         self.batch.ops.iter().any(|op| {
             matches!(
                 op,
-                Effect::Navigate {
-                    url: actual_url,
-                    mode: NavigateMode::Push,
-                    ..
-                } if actual_url == url
+                Effect::Visit { url: actual_url, .. } if actual_url == url
             )
         })
     }
@@ -428,7 +403,7 @@ impl EffectInspector {
 
     /// Assert that generated keyed-row metadata for a key is absent from payloads.
     pub fn payload_excludes_key(&self, key: impl ToString) -> bool {
-        self.payload_excludes(&format!("data-key=\"{}\"", key.to_string()))
+        self.payload_excludes(&format!("data-hemx-key=\"{}\"", key.to_string()))
     }
 
     /// Return HTML for a generated target containing text, without exposing raw payloads.
@@ -439,20 +414,16 @@ impl EffectInspector {
     ) -> Option<&str> {
         let resource = target.__hemx_resource_id();
         self.batch.ops.iter().find_map(|op| match op {
-            Effect::Put {
-                target,
-                payload: Payload::Html(html),
-            } if target.resource == resource && html.contains(needle) => Some(html.as_str()),
-            Effect::Insert {
-                target,
-                payload: Payload::Html(html),
-                ..
-            } if target.resource == resource && html.contains(needle) => Some(html.as_str()),
-            Effect::Prepend {
-                target,
-                payload: Payload::Html(html),
-                ..
-            } if target.resource == resource && html.contains(needle) => Some(html.as_str()),
+            Effect::Patch { target, html, .. }
+                if target.resource == resource && html.as_str().contains(needle) =>
+            {
+                Some(html.as_str())
+            }
+            Effect::Insert { target, html, .. }
+                if target.resource == resource && html.as_str().contains(needle) =>
+            {
+                Some(html.as_str())
+            }
             _ => None,
         })
     }
@@ -462,10 +433,8 @@ impl EffectInspector {
         self.batch.ops.iter().any(|op| {
             matches!(
                 op,
-                Effect::Emit {
-                    name: actual_name,
-                    payload: actual_payload,
-                } if actual_name == name && actual_payload == payload
+                Effect::Dispatch { event: actual_name, payload: actual_payload }
+                    if actual_name == name && actual_payload.as_slice() == payload.as_bytes()
             )
         })
     }
@@ -475,10 +444,8 @@ impl EffectInspector {
         self.batch.ops.iter().any(|op| {
             matches!(
                 op,
-                Effect::Emit {
-                    name: actual_name,
-                    payload,
-                } if actual_name == name && payload.contains(needle)
+                Effect::Dispatch { event: actual_name, payload }
+                    if actual_name == name && String::from_utf8_lossy(payload).contains(needle)
             )
         })
     }
@@ -498,64 +465,43 @@ impl EffectInspector {
         self.has_resource(slot.id())
     }
 
-    pub fn has_atom<T>(&self, atom: Atom<T>) -> bool {
-        self.has_resource(atom.id())
-    }
-
     pub fn has_form<T>(&self, form: Form<T>) -> bool {
         self.has_resource(form.id())
-    }
-
-    /// Assert that a generated form is reset/cleared without matching raw events in tests.
-    pub fn resets_form<T>(&self, form: Form<T>) -> bool {
-        let form_id = form.id().id.to_string();
-        self.batch.ops.iter().any(|op| {
-            matches!(
-                op,
-                Effect::Emit { name, payload }
-                    if name == "hemx:form-reset" && payload == &form_id
-            )
-        })
     }
 }
 
 fn effect_payload_contains(op: &Effect, needle: &str) -> bool {
     match op {
-        Effect::Put { payload, .. }
-        | Effect::Insert { payload, .. }
-        | Effect::Prepend { payload, .. } => payload_value(payload).contains(needle),
-        Effect::Emit { payload, .. } => payload.contains(needle),
-        Effect::Navigate { url, .. } => url.contains(needle),
-        Effect::Remove { .. } | Effect::Move { .. } | Effect::Focus { .. } => false,
-    }
-}
-
-fn payload_value(payload: &Payload) -> &str {
-    match payload {
-        Payload::Text(value) | Payload::Html(value) => value,
+        Effect::Patch { html, .. } | Effect::Insert { html, .. } => html.as_str().contains(needle),
+        Effect::Dispatch { payload, .. } => String::from_utf8_lossy(payload).contains(needle),
+        Effect::Visit { url, .. } => url.contains(needle),
+        Effect::Remove { .. }
+        | Effect::Move { .. }
+        | Effect::Focus { .. }
+        | Effect::Scroll { .. } => false,
     }
 }
 
 fn op_targets_resource(op: &Effect, resource: ResourceId) -> bool {
     match op {
-        Effect::Put { target, .. }
+        Effect::Patch { target, .. }
         | Effect::Insert { target, .. }
-        | Effect::Prepend { target, .. }
-        | Effect::Remove { target, .. }
+        | Effect::Remove { target }
         | Effect::Move { target, .. }
-        | Effect::Focus { target } => target.resource == resource,
-        Effect::Navigate { .. } | Effect::Emit { .. } => false,
+        | Effect::Focus { target, .. }
+        | Effect::Scroll { target, .. } => target.resource == resource,
+        Effect::Visit { .. } | Effect::Dispatch { .. } => false,
     }
 }
 
 fn op_targets_ref(op: &Effect, wanted: &ResourceRef) -> bool {
     match op {
-        Effect::Put { target, .. }
+        Effect::Patch { target, .. }
         | Effect::Insert { target, .. }
-        | Effect::Prepend { target, .. }
-        | Effect::Remove { target, .. }
+        | Effect::Remove { target }
         | Effect::Move { target, .. }
-        | Effect::Focus { target } => target == wanted,
-        Effect::Navigate { .. } | Effect::Emit { .. } => false,
+        | Effect::Focus { target, .. }
+        | Effect::Scroll { target, .. } => target == wanted,
+        Effect::Visit { .. } | Effect::Dispatch { .. } => false,
     }
 }

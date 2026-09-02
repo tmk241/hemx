@@ -101,7 +101,7 @@ impl HtmlInspector {
 
     /// Select elements carrying the runtime marker for a typed handle.
     pub fn select_handle<I>(&self, handle: Handle<I>) -> HtmlSelection {
-        self.selection_or_panic(&attribute_selector("data-hid", &handle.to_string()))
+        self.selection_or_panic(&attribute_selector("data-hemx-action", &handle.to_string()))
     }
 
     /// Assert that rendered HTML contains a typed handle marker.
@@ -299,10 +299,9 @@ impl Error for HtmlInspectionError {}
 
 fn resource_attribute(kind: ResourceKind) -> &'static str {
     match kind {
-        ResourceKind::Slot => "data-sid",
-        ResourceKind::Atom => "data-aid",
-        ResourceKind::Handle => "data-hid",
-        ResourceKind::Form => "data-fid",
+        ResourceKind::Slot => "data-hemx-resource",
+        ResourceKind::Handle => "data-hemx-action",
+        ResourceKind::Form => "data-hemx-resource",
     }
 }
 

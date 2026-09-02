@@ -9,9 +9,10 @@ use axum::{
 use hemx_axum::{
     interactions, runtime_js, runtime_js_hash, runtime_js_path, runtime_js_route_path,
     runtime_js_script_src, runtime_js_source, DispatchRejection, EffectResponse, Form,
-    HandlerErrorContext, HandlerFailure, InteractionForm, InteractionFormRejection,
-    InteractionRequest, IntoHandlerFailure, PageMode, PageRequest, PageResponse, HEMX_CONTENT_TYPE,
-    HEMX_FINGERPRINT_HEADER, HEMX_PARTIAL_HEADER, HEMX_RUNTIME_CONTENT_TYPE, HEMX_TITLE_HEADER,
+    FormDecodeError, FromInteractionForm, HandlerErrorContext, HandlerFailure, InteractionForm,
+    InteractionFormRejection, InteractionRequest, IntoHandlerFailure, PageMode, PageRequest,
+    PageResponse, HEMX_CONTENT_TYPE, HEMX_FINGERPRINT_HEADER, HEMX_PARTIAL_HEADER,
+    HEMX_RUNTIME_CONTENT_TYPE, HEMX_TITLE_HEADER,
 };
 use hemx_core::{push, BuildFingerprint, Effect, Handle, IntoEffect, SafeHtml, Slot};
 use scraper::{Html, Selector};
@@ -36,6 +37,39 @@ async fn multipart_mutation(request: InteractionRequest) -> StatusCode {
     assert_eq!(upload.content_type.as_deref(), Some("text/plain"));
     assert_eq!(upload.bytes, b"hello");
     StatusCode::NO_CONTENT
+}
+
+struct TypedUpload {
+    title: String,
+    bytes: usize,
+}
+
+impl FromInteractionForm for TypedUpload {
+    fn from_interaction_form(form: &InteractionForm) -> Result<Self, FormDecodeError> {
+        let title = form
+            .value("title")
+            .ok_or_else(|| FormDecodeError::new("missing title"))?;
+        let upload = form
+            .file("upload")
+            .ok_or_else(|| FormDecodeError::new("missing upload"))?;
+        Ok(Self {
+            title: title.to_owned(),
+            bytes: upload.bytes.len(),
+        })
+    }
+}
+
+async fn typed_multipart_mutation(
+    request: InteractionRequest,
+) -> Result<EffectResponse, DispatchRejection> {
+    request.dispatch(interactions(BuildFingerprint(4)).on_form(
+        Handle::<()>::new(7),
+        |upload: TypedUpload| {
+            assert_eq!(upload.title, "report");
+            assert_eq!(upload.bytes, 5);
+            Slot::<String>::new(3).text("accepted")
+        },
+    ))
 }
 
 #[tokio::test]
@@ -131,6 +165,25 @@ async fn interaction_boundary_extracts_multipart_fields_and_files() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let typed_response = Router::new()
+        .route("/typed-upload", post(typed_multipart_mutation))
+        .oneshot(
+            Request::post("/typed-upload")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(typed_response.status(), StatusCode::OK);
+    assert_eq!(
+        typed_response.headers()[header::CONTENT_TYPE],
+        HEMX_CONTENT_TYPE
+    );
 }
 
 #[tokio::test]

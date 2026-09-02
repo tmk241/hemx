@@ -1,4 +1,7 @@
-use hemx_core::{Effect, GeneratedTarget, Payload, ResourceId, ResourceKind, ResourceRef};
+use hemx_core::{
+    Effect, GeneratedTarget, InsertPosition, PatchMode, ResourceId, ResourceKind, ResourceRef,
+    SafeHtml,
+};
 
 fn panic_text<T>(result: std::thread::Result<T>) -> String {
     let panic = match result {
@@ -46,7 +49,7 @@ fn inspects_generated_targets_and_handles_without_raw_runtime_ids() {
     let target = TestTarget(ResourceKind::Slot, 42);
     let handle = hemx_core::Handle::<()>::new(7);
     let inspected = hemx_test::inspect_html_fragment(
-        r#"<section data-sid="42"><button data-hid="7">Save</button></section>"#,
+        r#"<section data-hemx-resource="42"><button data-hemx-action="7">Save</button></section>"#,
     );
 
     inspected.assert_target(target);
@@ -79,49 +82,51 @@ fn inspects_fragments_and_keeps_selections_owned() {
 #[test]
 fn inspects_generated_target_document_and_fragment_payloads() {
     let document_target = TestTarget(ResourceKind::Slot, 1);
-    let document_effect = Effect::Put {
+    let document_effect = Effect::Patch {
         target: ResourceRef::unscoped(document_target.__hemx_resource_id()),
-        payload: Payload::Html(
-            "<!doctype html><html><body><main id=app>ready</main></body></html>".into(),
+        mode: PatchMode::Morph,
+        html: SafeHtml::trusted(
+            "<!doctype html><html><body><main id=app>ready</main></body></html>",
         ),
     };
     let document = hemx_test::inspect(document_effect)
         .target_html_document(document_target)
         .unwrap();
     document.assert_text("main#app", "ready");
-    assert!(document.origin().contains("Put HTML effect"));
+    assert!(document.origin().contains("Patch HTML effect"));
 
     for (effect, operation) in [
         (
             Effect::Insert {
                 target: ResourceRef::unscoped(ResourceId::new(ResourceKind::Slot, 2)),
-                key: "later".into(),
-                payload: Payload::Html("<li data-key=later>later</li>".into()),
+                position: InsertPosition::Last,
+                html: SafeHtml::trusted("<li data-hemx-key=later>later</li>"),
             },
             "Insert",
         ),
         (
-            Effect::Prepend {
+            Effect::Insert {
                 target: ResourceRef::unscoped(ResourceId::new(ResourceKind::Slot, 2)),
-                key: "first".into(),
-                payload: Payload::Html("<li data-key=first>first</li>".into()),
+                position: InsertPosition::First,
+                html: SafeHtml::trusted("<li data-hemx-key=first>first</li>"),
             },
-            "Prepend",
+            "Insert",
         ),
     ] {
         let fragment = hemx_test::inspect(effect)
             .target_html_fragment(TestTarget(ResourceKind::Slot, 2))
             .unwrap();
-        fragment.assert_count("li[data-key]", 1);
+        fragment.assert_count("li[data-hemx-key]", 1);
         assert!(fragment.origin().contains(operation));
     }
 }
 
 #[test]
 fn target_html_errors_explain_missing_non_html_and_ambiguous_effects() {
-    let missing = hemx_test::inspect(Effect::Put {
+    let missing = hemx_test::inspect(Effect::Patch {
         target: ResourceRef::unscoped(ResourceId::new(ResourceKind::Slot, 9)),
-        payload: Payload::Html("<p>other</p>".into()),
+        mode: PatchMode::Morph,
+        html: SafeHtml::trusted("<p>other</p>"),
     })
     .target_html_fragment(TestTarget(ResourceKind::Slot, 1))
     .unwrap_err()
@@ -131,25 +136,26 @@ fn target_html_errors_explain_missing_non_html_and_ambiguous_effects() {
     assert!(missing.contains("all effects"), "{missing}");
     assert!(missing.contains("other"), "{missing}");
 
-    let non_html = hemx_test::inspect(Effect::Put {
+    let non_html = hemx_test::inspect(Effect::Focus {
         target: ResourceRef::unscoped(ResourceId::new(ResourceKind::Slot, 1)),
-        payload: Payload::Text("plain text".into()),
+        prevent_scroll: false,
     })
     .target_html_fragment(TestTarget(ResourceKind::Slot, 1))
     .unwrap_err()
     .to_string();
     assert!(non_html.contains("found none"), "{non_html}");
-    assert!(non_html.contains("plain text"), "{non_html}");
+    assert!(non_html.contains("Focus"), "{non_html}");
 
     let ambiguous = hemx_test::inspect(vec![
-        Effect::Put {
+        Effect::Patch {
             target: ResourceRef::unscoped(ResourceId::new(ResourceKind::Slot, 1)),
-            payload: Payload::Html("<p>one</p>".into()),
+            mode: PatchMode::Morph,
+            html: SafeHtml::trusted("<p>one</p>"),
         },
         Effect::Insert {
             target: ResourceRef::unscoped(ResourceId::new(ResourceKind::Slot, 1)),
-            key: "two".into(),
-            payload: Payload::Html("<p>two</p>".into()),
+            position: InsertPosition::Last,
+            html: SafeHtml::trusted("<p>two</p>"),
         },
     ])
     .target_html_fragment(TestTarget(ResourceKind::Slot, 1))

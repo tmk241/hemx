@@ -10,6 +10,27 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod artifact;
+mod authoring;
+mod rust_source;
+
+use artifact::{
+    collect_input_files, generated_targets, parse_error, unkeyed_generated_target_diagnostics,
+    write_if_changed, Resources,
+};
+use authoring::{
+    reject_invalid_hemx_attr_placement, reject_invalid_hemx_attr_values,
+    reject_selector_target_attrs, reject_unkeyed_loop, reject_unknown_hemx_attrs,
+};
+#[cfg(test)]
+use rust_source::{
+    collect_rust_struct_facts_from_file, compact_tokens, h_for_local_and_self_field,
+    vec_element_type,
+};
+use rust_source::{
+    context_type_for_heml_path, loop_locals_for_surface, nearest_dir_with, rust_struct_facts_in,
+};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticSeverity {
     Error,
@@ -83,12 +104,6 @@ pub struct TemplateLocalFact {
     pub name: String,
     pub type_name: String,
     pub fields: Vec<TemplateFieldFact>,
-}
-
-#[derive(Debug, Clone)]
-struct RustStructFact {
-    fields: Vec<TemplateFieldFact>,
-    derives_hemplate: bool,
 }
 
 pub fn diagnostics_for_heml_file(path: impl AsRef<Path>) -> io::Result<Vec<Diagnostic>> {
@@ -235,16 +250,6 @@ impl AppBuilder {
     }
 }
 
-fn write_if_changed(path: &Path, contents: &[u8]) -> io::Result<()> {
-    match std::fs::read(path) {
-        Ok(existing) if existing == contents => return Ok(()),
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    std::fs::write(path, contents)
-}
-
 pub fn app() -> AppBuilder {
     AppBuilder {
         out_dir: None,
@@ -253,1882 +258,10 @@ pub fn app() -> AppBuilder {
         surfaces: Vec::new(),
     }
 }
-
-#[derive(Default)]
-struct Resources {
-    slots: BTreeMap<String, Resource>,
-    handles: BTreeMap<String, Resource>,
-    handle_forms: BTreeMap<String, String>,
-    handle_params: BTreeMap<String, BTreeSet<String>>,
-    forms: BTreeMap<String, FormResource>,
-    atoms: BTreeMap<String, Resource>,
-    classes: BTreeMap<String, ClassToken>,
-    events: BTreeMap<String, EventToken>,
-}
-
-#[derive(Clone, Debug)]
-struct Resource {
-    symbol: String,
-    ident: String,
-    component: String,
-    keyed: bool,
-    id: u32,
-}
-
-#[derive(Clone, Debug)]
-struct FormResource {
-    resource: Resource,
-    controls: Vec<GeneratedControl>,
-}
-
-#[derive(Clone, Debug)]
-struct GeneratedControl {
-    name: String,
-    kind: ControlKind,
-    required: bool,
-}
-
-#[derive(Clone, Debug)]
-struct ClassToken {
-    symbol: String,
-    ident: String,
-    component: String,
-    token: String,
-}
-
-#[derive(Clone, Debug)]
-struct EventToken {
-    symbol: String,
-    ident: String,
-    component: String,
-    name: String,
-}
-
-impl Resources {
-    fn add_surface(
-        &mut self,
-        root: &Path,
-        path: &Path,
-        surface: &SurfaceDocument,
-    ) -> io::Result<()> {
-        let component = component_ident(root, path)?;
-        for node in &surface.nodes {
-            let SurfaceNodeKind::Element { tag } = &node.kind else {
-                continue;
-            };
-
-            reject_selector_target_attrs(path, &node.attrs)?;
-            reject_unknown_hemx_attrs(path, &node.attrs)?;
-            reject_invalid_hemx_attr_values(path, &node.attrs)?;
-            reject_invalid_hemx_attr_placement(path, tag, &node.attrs)?;
-
-            if let Some(class_attr) = static_attr(&node.attrs, "class") {
-                for token in class_tokens(&class_attr) {
-                    let canonical = canonical_symbol(root, path, token);
-                    self.insert_class(canonical, token.to_owned(), component.clone())?;
-                }
-            }
-
-            if let Some(on_attr) = static_attr(&node.attrs, "data-hemx-on") {
-                for event in event_tokens(&on_attr) {
-                    let canonical = canonical_symbol(root, path, event);
-                    self.insert_event(canonical, event.to_owned(), component.clone());
-                }
-            }
-
-            if let Some(name) = static_attr(&node.attrs, "data-hemx-slot") {
-                reject_unkeyed_loop(surface, node.scope, path, "slot", &name)?;
-                let keyed = is_inside_keyed_for(surface, node.scope)
-                    || (can_host_keyed_collection(tag)
-                        && has_descendant_keyed_for_scope(surface, node.scope));
-                let canonical = canonical_symbol(root, path, &name);
-                self.insert_slot(canonical, name, component.clone(), keyed)?;
-            }
-
-            if let Some(name) = static_attr(&node.attrs, "data-hemx-atom") {
-                reject_unkeyed_loop(surface, node.scope, path, "atom", &name)?;
-                let canonical = canonical_symbol(root, path, &name);
-                self.insert_atom(canonical, name, component.clone())?;
-            }
-
-            if let Some(name) = static_attr(&node.attrs, "data-hemx-handle") {
-                reject_unkeyed_loop(surface, node.scope, path, "handle", &name)?;
-                let canonical = canonical_symbol(root, path, &name);
-                self.insert_handle(canonical, name.clone(), component.clone())?;
-                self.insert_handle_params(&name, &node.attrs)?;
-
-                if tag == "form" {
-                    let form_name =
-                        static_attr(&node.attrs, "data-hemx-form").unwrap_or_else(|| name.clone());
-                    let controls = surface
-                        .forms
-                        .iter()
-                        .find(|form| form.node == node.id)
-                        .map(|form| {
-                            form.controls
-                                .iter()
-                                .map(|control| GeneratedControl {
-                                    name: control.name.clone(),
-                                    kind: control.kind.clone(),
-                                    required: control.required,
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    self.insert_form(
-                        canonical_symbol(root, path, &form_name),
-                        form_name.clone(),
-                        component.clone(),
-                        controls,
-                    )?;
-                    if let (Some(handle_ident), Some(form_ident)) =
-                        (rust_ident(&name), rust_ident(&form_name))
-                    {
-                        self.handle_forms.insert(handle_ident, form_ident);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn insert_slot(
-        &mut self,
-        symbol: String,
-        name: String,
-        component: String,
-        keyed: bool,
-    ) -> io::Result<()> {
-        let slot = insert_resource(&mut self.slots, "slot", symbol, name, component)?;
-        slot.keyed |= keyed;
-        Ok(())
-    }
-
-    fn insert_handle(&mut self, symbol: String, name: String, component: String) -> io::Result<()> {
-        insert_resource(&mut self.handles, "handle", symbol, name, component).map(|_| ())
-    }
-
-    fn insert_atom(&mut self, symbol: String, name: String, component: String) -> io::Result<()> {
-        insert_resource(&mut self.atoms, "atom", symbol, name, component).map(|_| ())
-    }
-
-    fn insert_class(&mut self, symbol: String, token: String, component: String) -> io::Result<()> {
-        let ident = class_ident(&token).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "invalid CSS class `{token}`; expected an ASCII class token usable from Rust"
-                ),
-            )
-        })?;
-        let class = ClassToken {
-            symbol,
-            ident,
-            component,
-            token,
-        };
-        if let Some(existing) = self
-            .classes
-            .values()
-            .find(|existing| existing.ident == class.ident && existing.token != class.token)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "duplicate generated class identifier `{}` for CSS classes `{}` and `{}`",
-                    class.ident, existing.token, class.token
-                ),
-            ));
-        }
-        self.classes.entry(class.symbol.clone()).or_insert(class);
-        Ok(())
-    }
-
-    fn insert_handle_params(&mut self, handle: &str, attrs: &[SurfaceAttribute]) -> io::Result<()> {
-        let Some(handle_ident) = rust_ident(handle) else {
-            return Ok(());
-        };
-        for attr in attrs {
-            if !is_handle_param_attr(attr) {
-                continue;
-            }
-            let Some(param) = data_param_ident(&attr.name) else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("invalid handler param attribute `{}`; expected data-* name usable from Rust", attr.name),
-                ));
-            };
-            self.handle_params
-                .entry(handle_ident.clone())
-                .or_default()
-                .insert(param);
-        }
-        Ok(())
-    }
-
-    fn insert_event(&mut self, symbol: String, name: String, component: String) {
-        self.events.entry(symbol.clone()).or_insert(EventToken {
-            symbol,
-            ident: name.clone(),
-            component,
-            name,
-        });
-    }
-
-    fn insert_form(
-        &mut self,
-        symbol: String,
-        name: String,
-        component: String,
-        controls: Vec<GeneratedControl>,
-    ) -> io::Result<()> {
-        let controls = controls
-            .into_iter()
-            .filter(|control| control.name != "__h")
-            .collect();
-        let resource = make_resource("form", symbol, name, component)?;
-        match self.forms.get(&resource.ident) {
-            Some(existing) if existing.resource.symbol != resource.symbol => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "duplicate generated identifier `{}` for `{}` and `{}`",
-                    resource.ident, existing.resource.symbol, resource.symbol
-                ),
-            )),
-            Some(_) => Ok(()),
-            None => {
-                self.forms
-                    .insert(resource.ident.clone(), FormResource { resource, controls });
-                Ok(())
-            }
-        }
-    }
-
-    fn add_stylesheet(&mut self, root: &Path, path: &Path, source: &str) -> io::Result<()> {
-        let component = component_ident(root, path)?;
-        for token in stylesheet_class_tokens(source) {
-            let canonical = canonical_symbol(root, path, token);
-            self.insert_class(canonical, token.to_owned(), component.clone())?;
-        }
-        Ok(())
-    }
-
-    fn generated_rs(&self, global_exports: bool) -> String {
-        let mut out = String::new();
-        out.push_str("// @generated by hemx-build. Do not edit.\n");
-        out.push_str(&format!(
-            "pub const BUILD_FINGERPRINT: ::hemx::advanced::BuildFingerprint = ::hemx::advanced::BuildFingerprint::from_parts(&[{}]);\n\n",
-            self.fingerprint_parts()
-                .into_iter()
-                .map(|part| part.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-
-        let component_names: BTreeSet<String> = self.component_names().into_iter().collect();
-
-        let root_indent = usize::default();
-        if global_exports {
-            self.push_component_refs(&mut out);
-            self.push_resource_modules(&mut out, &component_names, None, root_indent);
-        }
-        self.push_lowering_api(&mut out, None, root_indent);
-
-        for component in self.component_names() {
-            out.push_str("\n#[allow(non_upper_case_globals)]\n");
-            out.push_str(&format!("pub mod {component} {{\n"));
-            out.push_str("    #[derive(Clone, Copy)]\n");
-            out.push_str("    pub struct Component;\n\n");
-            self.push_resource_modules(&mut out, &component_names, Some(&component), 1);
-            self.push_lowering_api(&mut out, Some(&component), 1);
-            out.push_str("}\n");
-        }
-
-        self.push_lowering_helpers(&mut out);
-        out
-    }
-
-    fn push_component_refs(&self, out: &mut String) {
-        out.push_str("#[allow(non_upper_case_globals)]\npub mod components {\n");
-        for component in self.component_names() {
-            out.push_str(&format!(
-                "    pub const {component}: ::hemx::ComponentRef = ::hemx::ComponentRef::new({});\n",
-                rust_str(&component)
-            ));
-        }
-        out.push_str("}\n");
-    }
-
-    fn push_resource_modules(
-        &self,
-        out: &mut String,
-        components: &BTreeSet<String>,
-        component: Option<&str>,
-        indent: usize,
-    ) {
-        let pad = "    ".repeat(indent);
-        let inner = "    ".repeat(indent + 1);
-        let mut handle_ids = Vec::new();
-        let mut root_exports = BTreeSet::new();
-
-        if let Some(component) = component {
-            out.push_str(&format!(
-                "{pad}pub const COMPONENT: ::hemx::ComponentRef = ::hemx::ComponentRef::new({});\n",
-                rust_str(component)
-            ));
-        }
-
-        out.push_str(&format!("{pad}#[doc(hidden)]\n{pad}pub mod advanced {{\n"));
-        out.push_str(&format!(
-            "{inner}#[allow(non_upper_case_globals)]\n{inner}pub mod slots {{\n"
-        ));
-        let slot_inner = "    ".repeat(indent + 2);
-        for res in self
-            .slots
-            .values()
-            .filter(|res| component_matches(res, component))
-        {
-            if res.keyed {
-                out.push_str(&format!(
-                    "{slot_inner}pub const {}: ::hemx::advanced::KeyedSlot<::std::string::String, ::std::string::String> = ::hemx::advanced::KeyedSlot::new({});\n",
-                    res.ident, res.id
-                ));
-            } else {
-                out.push_str(&format!(
-                    "{slot_inner}pub const {}: ::hemx::advanced::Slot<::std::string::String> = ::hemx::advanced::Slot::new({});\n",
-                    res.ident, res.id
-                ));
-            }
-        }
-        out.push_str(&format!("{inner}}}\n"));
-        out.push_str(&format!("{pad}}}\n\n"));
-
-        out.push_str(&format!(
-            "{pad}#[allow(non_upper_case_globals)]\n{pad}pub mod targets {{\n"
-        ));
-        let child_prefix = if component.is_some() {
-            "super::super::"
-        } else {
-            "super::"
-        };
-        out.push_str(&format!("{inner}#[derive(Clone, Copy)]\n"));
-        out.push_str(&format!(
-            "{inner}pub struct SlotTarget<T, C = ()> {{ slot: ::hemx::advanced::Slot<T>, _marker: ::std::marker::PhantomData<C> }}\n"
-        ));
-        out.push_str(&format!("{inner}#[allow(dead_code)]\n"));
-        out.push_str(&format!("{inner}impl<T, C> SlotTarget<T, C> {{\n"));
-        out.push_str(&format!("{inner}    const fn new(slot: ::hemx::advanced::Slot<T>) -> Self {{ Self {{ slot, _marker: ::std::marker::PhantomData }} }}\n"));
-        out.push_str(&format!("{inner}    pub fn text(self, value: impl ::std::string::ToString) -> ::hemx::advanced::Effect {{ self.slot.text(value) }}\n"));
-        out.push_str(&format!("{inner}    pub fn set(self, value: impl ::std::string::ToString) -> ::hemx::advanced::Effect {{ self.slot.text(value) }}\n"));
-        out.push_str(&format!("{inner}}}\n"));
-        out.push_str(&format!("{inner}impl<T> SlotTarget<T, ()> {{\n"));
-        out.push_str(&format!("{inner}    pub fn put(self, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ super::put(self.slot, view) }}\n"));
-        out.push_str(&format!("{inner}    pub fn replace(self, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ super::put(self.slot, view) }}\n"));
-        out.push_str(&format!("{inner}}}\n"));
-        for res in self
-            .slots
-            .values()
-            .filter(|res| component_matches(res, component))
-            .filter(|res| components.contains(&res.ident) && Some(res.ident.as_str()) != component)
-        {
-            let child = &res.ident;
-            out.push_str(&format!(
-                "{inner}impl<T> SlotTarget<T, {child_prefix}{child}::Component> {{\n"
-            ));
-            out.push_str(&format!("{inner}    pub fn put(self, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ {child_prefix}{child}::put(self.slot, view) }}\n"));
-            out.push_str(&format!("{inner}    pub fn replace(self, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ {child_prefix}{child}::put(self.slot, view) }}\n"));
-            out.push_str(&format!("{inner}}}\n"));
-        }
-        out.push_str(&format!(
-            "{inner}impl<T, C> ::hemx::GeneratedTarget for SlotTarget<T, C> {{\n"
-        ));
-        out.push_str(&format!("{inner}    fn __hemx_resource_id(self) -> ::hemx::advanced::ResourceId {{ self.slot.id() }}\n"));
-        out.push_str(&format!("{inner}}}\n"));
-        out.push_str(&format!("{inner}#[derive(Clone, Copy)]\n"));
-        out.push_str(&format!("{inner}pub struct KeyedSlotTarget<K, T, C = ()> {{ slot: ::hemx::advanced::KeyedSlot<K, T>, _marker: ::std::marker::PhantomData<C> }}\n"));
-        out.push_str(&format!("{inner}#[allow(dead_code)]\n"));
-        out.push_str(&format!("{inner}impl<K, T, C> KeyedSlotTarget<K, T, C>\n"));
-        out.push_str(&format!("{inner}where\n"));
-        out.push_str(&format!("{inner}    K: ::std::string::ToString,\n"));
-        out.push_str(&format!("{inner}{{\n"));
-        out.push_str(&format!("{inner}    const fn new(slot: ::hemx::advanced::KeyedSlot<K, T>) -> Self {{ Self {{ slot, _marker: ::std::marker::PhantomData }} }}\n"));
-        out.push_str(&format!("{inner}}}\n"));
-        out.push_str(&format!(
-            "{inner}impl<K: ::std::string::ToString, T, C> KeyedSlotTarget<K, T, C> {{\n"
-        ));
-        out.push_str(&format!("{inner}    pub fn move_before(self, key: K, before: K) -> ::hemx::advanced::Effect {{ self.slot.move_before(key, before) }}\n"));
-        out.push_str(&format!("{inner}    pub fn move_to_end(self, key: K) -> ::hemx::advanced::Effect {{ self.slot.move_to_end(key) }}\n"));
-        out.push_str(&format!("{inner}    pub fn remove_key(self, key: K) -> ::hemx::advanced::Effect {{ self.slot.remove(key) }}\n"));
-        out.push_str(&format!("{inner}}}\n"));
-        out.push_str(&format!(
-            "{inner}impl<T> KeyedSlotTarget<::std::string::String, T, ()> {{\n"
-        ));
-        out.push_str(&format!("{inner}    pub fn append(self, view: impl ::hemplate::Hemplate + ::hemx::KeyedPartial) -> ::hemx::advanced::Effect {{ self.slot.append_html(view.hemx_key(), super::render(&view)) }}\n"));
-        out.push_str(&format!("{inner}    pub fn prepend(self, view: impl ::hemplate::Hemplate + ::hemx::KeyedPartial) -> ::hemx::advanced::Effect {{ self.slot.prepend_html(view.hemx_key(), super::render(&view)) }}\n"));
-        out.push_str(&format!("{inner}    pub fn replace(self, view: impl ::hemplate::Hemplate + ::hemx::KeyedPartial) -> ::hemx::advanced::Effect {{ self.slot.replace_html(view.hemx_key(), super::render(&view)) }}\n"));
-        out.push_str(&format!("{inner}    pub fn append_keyed(self, key: impl ::std::string::ToString, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ self.slot.append_html(key.to_string(), super::render(view)) }}\n"));
-        out.push_str(&format!("{inner}    pub fn prepend_keyed(self, key: impl ::std::string::ToString, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ self.slot.prepend_html(key.to_string(), super::render(view)) }}\n"));
-        out.push_str(&format!("{inner}    pub fn replace_keyed(self, key: impl ::std::string::ToString, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ self.slot.replace_html(key.to_string(), super::render(view)) }}\n"));
-        out.push_str(&format!("{inner}    pub fn remove(self, key: impl ::std::string::ToString) -> ::hemx::advanced::Effect {{ self.slot.remove(key.to_string()) }}\n"));
-        out.push_str(&format!("{inner}}}\n"));
-        for res in self
-            .slots
-            .values()
-            .filter(|res| component_matches(res, component))
-            .filter(|res| res.keyed)
-            .filter(|res| components.contains(&res.ident) && Some(res.ident.as_str()) != component)
-        {
-            let child = &res.ident;
-            out.push_str(&format!(
-                "{inner}impl<T> KeyedSlotTarget<::std::string::String, T, {child_prefix}{child}::Component> {{\n"
-            ));
-            out.push_str(&format!("{inner}    pub fn append(self, view: impl ::hemplate::Hemplate + ::hemx::KeyedPartial) -> ::hemx::advanced::Effect {{ self.slot.append_html(view.hemx_key(), {child_prefix}{child}::render(&view)) }}\n"));
-            out.push_str(&format!("{inner}    pub fn prepend(self, view: impl ::hemplate::Hemplate + ::hemx::KeyedPartial) -> ::hemx::advanced::Effect {{ self.slot.prepend_html(view.hemx_key(), {child_prefix}{child}::render(&view)) }}\n"));
-            out.push_str(&format!("{inner}    pub fn replace(self, view: impl ::hemplate::Hemplate + ::hemx::KeyedPartial) -> ::hemx::advanced::Effect {{ self.slot.replace_html(view.hemx_key(), {child_prefix}{child}::render(&view)) }}\n"));
-            out.push_str(&format!("{inner}    pub fn append_keyed(self, key: impl ::std::string::ToString, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ self.slot.append_html(key.to_string(), {child_prefix}{child}::render(view)) }}\n"));
-            out.push_str(&format!("{inner}    pub fn prepend_keyed(self, key: impl ::std::string::ToString, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ self.slot.prepend_html(key.to_string(), {child_prefix}{child}::render(view)) }}\n"));
-            out.push_str(&format!("{inner}    pub fn replace_keyed(self, key: impl ::std::string::ToString, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ self.slot.replace_html(key.to_string(), {child_prefix}{child}::render(view)) }}\n"));
-            out.push_str(&format!("{inner}    pub fn remove(self, key: impl ::std::string::ToString) -> ::hemx::advanced::Effect {{ self.slot.remove(key.to_string()) }}\n"));
-            out.push_str(&format!("{inner}}}\n"));
-        }
-        out.push_str(&format!(
-            "{inner}impl<K: ::std::string::ToString, T, C> ::hemx::GeneratedTarget for KeyedSlotTarget<K, T, C> {{\n"
-        ));
-        out.push_str(&format!("{inner}    fn __hemx_resource_id(self) -> ::hemx::advanced::ResourceId {{ self.slot.id() }}\n"));
-        out.push_str(&format!("{inner}}}\n"));
-        for res in self
-            .slots
-            .values()
-            .filter(|res| component_matches(res, component))
-        {
-            let marker = if components.contains(&res.ident) && Some(res.ident.as_str()) != component
-            {
-                format!("{child_prefix}{}::Component", res.ident)
-            } else {
-                "()".to_string()
-            };
-            if res.keyed {
-                out.push_str(&format!(
-                    "{inner}pub const {}: KeyedSlotTarget<::std::string::String, ::std::string::String, {marker}> = KeyedSlotTarget::new(super::advanced::slots::{});\n",
-                    res.ident, res.ident
-                ));
-            } else {
-                out.push_str(&format!(
-                    "{inner}pub const {}: SlotTarget<::std::string::String, {marker}> = SlotTarget::new(super::advanced::slots::{});\n",
-                    res.ident, res.ident
-                ));
-            }
-        }
-        out.push_str(&format!("{pad}}}\n"));
-        for res in self
-            .slots
-            .values()
-            .filter(|res| component_matches(res, component))
-        {
-            root_exports.insert(res.ident.clone());
-            out.push_str(&format!("{pad}pub use self::targets::{};\n", res.ident));
-        }
-        out.push('\n');
-
-        out.push_str(&format!(
-            "{pad}#[allow(non_upper_case_globals)]\n{pad}pub mod handles {{\n"
-        ));
-        for res in self
-            .handles
-            .values()
-            .filter(|res| component_matches(res, component))
-        {
-            handle_ids.push(res.id);
-            let input = if self.handle_forms.contains_key(&res.ident) {
-                "::hemx::Form<::std::string::String>"
-            } else {
-                "()"
-            };
-            out.push_str(&format!(
-                "{inner}pub const {}: ::hemx::Handle<{input}> = ::hemx::Handle::new({});\n",
-                res.ident, res.id
-            ));
-        }
-        out.push_str(&format!(
-            "{inner}pub const ALL_IDS: &[u32] = &[{}];\n",
-            handle_ids
-                .into_iter()
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-        out.push_str(&format!("{pad}}}\n"));
-        for res in self
-            .handles
-            .values()
-            .filter(|res| component_matches(res, component))
-        {
-            push_root_export(
-                out,
-                &pad,
-                "handles",
-                &mut root_exports,
-                &res.ident,
-                "handle",
-            );
-        }
-        out.push('\n');
-
-        out.push_str(&format!(
-            "{pad}#[allow(non_upper_case_globals)]\n{pad}pub mod params {{\n"
-        ));
-        let mut emitted_params = BTreeSet::new();
-        for res in self
-            .handles
-            .values()
-            .filter(|res| component_matches(res, component))
-        {
-            if let Some(params) = self.handle_params.get(&res.ident) {
-                for param in params {
-                    if emitted_params.insert(param.as_str()) {
-                        out.push_str(&format!(
-                            "{inner}pub const {param}: ::hemx::ParamName = ::hemx::ParamName::new({});\n",
-                            rust_str(param)
-                        ));
-                    }
-                }
-            }
-        }
-        out.push_str(&format!("{pad}}}\n\n"));
-
-        out.push_str(&format!(
-            "{pad}#[allow(non_upper_case_globals)]\n{pad}pub mod atoms {{\n"
-        ));
-        for res in self
-            .atoms
-            .values()
-            .filter(|res| component_matches(res, component))
-        {
-            out.push_str(&format!(
-                "{inner}pub const {}: ::hemx::Atom<::std::string::String> = ::hemx::Atom::new({});\n",
-                res.ident, res.id
-            ));
-        }
-        out.push_str(&format!("{pad}}}\n\n"));
-
-        out.push_str(&format!(
-            "{pad}#[allow(non_upper_case_globals)]\n{pad}pub mod classes {{\n"
-        ));
-        let mut emitted_classes = BTreeSet::new();
-        for class in self
-            .classes
-            .values()
-            .filter(|class| class_matches(class, component))
-        {
-            if !emitted_classes.insert(class.ident.as_str()) {
-                continue;
-            }
-            out.push_str(&format!(
-                "{inner}pub const {}: ::hemx::CssClass = ::hemx::CssClass::new({});\n",
-                class.ident,
-                rust_str(&class.token)
-            ));
-        }
-        out.push_str(&format!("{pad}}}\n\n"));
-
-        out.push_str(&format!(
-            "{pad}#[allow(non_upper_case_globals)]\n{pad}pub mod events {{\n"
-        ));
-        let mut emitted_events = BTreeSet::new();
-        for event in self
-            .events
-            .values()
-            .filter(|event| event_matches(event, component))
-        {
-            if !emitted_events.insert(event.ident.as_str()) {
-                continue;
-            }
-            out.push_str(&format!(
-                "{inner}pub const {}: ::hemx::EventName = ::hemx::EventName::new({});\n",
-                event.ident,
-                rust_str(&event.name)
-            ));
-        }
-        out.push_str(&format!("{pad}}}\n\n"));
-
-        out.push_str(&format!(
-            "{pad}#[allow(non_upper_case_globals)]\n{pad}pub mod forms {{\n"
-        ));
-        for form in self
-            .forms
-            .values()
-            .filter(|form| component_matches(&form.resource, component))
-        {
-            let res = &form.resource;
-            out.push_str(&format!(
-                "{inner}pub const {}: ::hemx::Form<::std::string::String> = ::hemx::Form::new({});\n",
-                res.ident, res.id
-            ));
-            out.push_str(&format!(
-                "{inner}pub const {}_CONTRACT: ::hemx::FormContract = ::hemx::FormContract {{ fields: {}_FIELDS }};\n",
-                res.ident.to_ascii_uppercase(), res.ident.to_ascii_uppercase()
-            ));
-            out.push_str(&format!(
-                "{inner}pub const {}_FIELDS: &[::hemx::FormField] = &[\n",
-                res.ident.to_ascii_uppercase()
-            ));
-            for control in &form.controls {
-                out.push_str(&format!(
-                    "{inner}    ::hemx::FormField {{ name: {}, kind: {}, required: {} }},\n",
-                    rust_str(&control.name),
-                    form_control_kind_expr(&control.kind),
-                    control.required
-                ));
-            }
-            out.push_str(&format!("{inner}];\n"));
-        }
-        out.push_str(&format!("{pad}}}\n"));
-        for form in self
-            .forms
-            .values()
-            .filter(|form| component_matches(&form.resource, component))
-        {
-            push_root_export(
-                out,
-                &pad,
-                "forms",
-                &mut root_exports,
-                &form.resource.ident,
-                "form",
-            );
-        }
-    }
-
-    fn push_lowering_api(&self, out: &mut String, component: Option<&str>, indent: usize) {
-        let pad = "    ".repeat(indent);
-        let table_name = match component {
-            Some(component) => format!("__HEMX_LOWERING_TABLE_{}", component.to_ascii_uppercase()),
-            None => "__HEMX_LOWERING_TABLE".to_string(),
-        };
-        out.push_str(&format!("\n{pad}pub fn lower(html: impl ::std::convert::AsRef<str>) -> ::std::string::String {{\n"));
-        out.push_str(&format!("{pad}    "));
-        if component.is_some() {
-            out.push_str("super::");
-        }
-        out.push_str(&format!("__hemx_lower_html(html.as_ref(), {table_name})\n"));
-        out.push_str(&format!("{pad}}}\n\n"));
-        out.push_str(&format!("{pad}#[doc(hidden)]\n"));
-        out.push_str(&format!("{pad}pub fn lower_html(html: impl ::std::convert::AsRef<str>) -> ::std::string::String {{ lower(html) }}\n\n"));
-        out.push_str(&format!(
-            "{pad}pub fn static_fragment(html: &'static str) -> ::hemx::Html {{\n"
-        ));
-        out.push_str(&format!(
-            "{pad}    ::hemx::__private::html_trusted(lower(html))\n"
-        ));
-        out.push_str(&format!("{pad}}}\n\n"));
-        out.push_str(&format!("{pad}#[doc(hidden)]\n"));
-        out.push_str(&format!(
-            "{pad}pub fn render(view: &impl ::hemplate::Hemplate) -> ::hemx::Html {{\n"
-        ));
-        out.push_str(&format!(
-            "{pad}    let mut html = ::std::string::String::new();\n"
-        ));
-        out.push_str(&format!("{pad}    ::hemplate::Hemplate::render_into(view, &mut html).expect(\"hemx hemplate view renders\");\n"));
-        out.push_str(&format!(
-            "{pad}    ::hemx::__private::html_trusted(lower(html))\n"
-        ));
-        out.push_str(&format!("{pad}}}\n\n"));
-        out.push_str(&format!(
-            "{pad}pub fn page(view: &impl ::hemplate::Hemplate) -> ::hemx::Html {{ render(view) }}\n\n"
-        ));
-        out.push_str(&format!("{pad}#[doc(hidden)]\n"));
-        out.push_str(&format!("{pad}pub fn render_html(view: &impl ::hemplate::Hemplate) -> ::hemx::Html {{ render(view) }}\n\n"));
-        out.push_str(&format!("{pad}#[doc(hidden)]\n"));
-        out.push_str(&format!("{pad}pub fn put<T>(slot: ::hemx::advanced::Slot<T>, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{\n"));
-        out.push_str(&format!("{pad}    slot.html(render(view))\n"));
-        out.push_str(&format!("{pad}}}\n\n"));
-        out.push_str(&format!("{pad}#[doc(hidden)]\n"));
-        out.push_str(&format!("{pad}pub fn append<K, T>(slot: ::hemx::advanced::KeyedSlot<K, T>, key: K, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect\n"));
-        out.push_str(&format!("{pad}where\n"));
-        out.push_str(&format!("{pad}    K: ::std::string::ToString,\n"));
-        out.push_str(&format!("{pad}{{\n"));
-        out.push_str(&format!("{pad}    slot.append_html(key, render(view))\n"));
-        out.push_str(&format!("{pad}}}\n\n"));
-        out.push_str(&format!("{pad}#[doc(hidden)]\n"));
-        out.push_str(&format!("{pad}pub fn prepend<K, T>(slot: ::hemx::advanced::KeyedSlot<K, T>, key: K, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect\n"));
-        out.push_str(&format!("{pad}where\n"));
-        out.push_str(&format!("{pad}    K: ::std::string::ToString,\n"));
-        out.push_str(&format!("{pad}{{\n"));
-        out.push_str(&format!("{pad}    slot.prepend_html(key, render(view))\n"));
-        out.push_str(&format!("{pad}}}\n\n"));
-        out.push_str(&format!("{pad}#[doc(hidden)]\n"));
-        out.push_str(&format!("{pad}pub fn replace<K, T>(slot: ::hemx::advanced::KeyedSlot<K, T>, key: K, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect\n"));
-        out.push_str(&format!("{pad}where\n"));
-        out.push_str(&format!("{pad}    K: ::std::string::ToString,\n"));
-        out.push_str(&format!("{pad}{{\n"));
-        out.push_str(&format!("{pad}    slot.replace_html(key, render(view))\n"));
-        out.push_str(&format!("{pad}}}\n\n"));
-        self.push_lowering_table(out, component, indent, &table_name);
-    }
-
-    fn push_lowering_table(
-        &self,
-        out: &mut String,
-        component: Option<&str>,
-        indent: usize,
-        name: &str,
-    ) {
-        let pad = "    ".repeat(indent);
-        out.push_str(&format!("{pad}const {name}: &[(&str, &str, u32)] = &[\n"));
-        for res in self
-            .slots
-            .values()
-            .filter(|res| component_matches(res, component))
-        {
-            out.push_str(&format!(
-                "{pad}    (\"data-hemx-slot\", {}, {}),\n",
-                rust_str(&res.ident),
-                res.id
-            ));
-        }
-        for res in self
-            .handles
-            .values()
-            .filter(|res| component_matches(res, component))
-        {
-            out.push_str(&format!(
-                "{pad}    (\"data-hemx-handle\", {}, {}),\n",
-                rust_str(&res.ident),
-                res.id
-            ));
-        }
-        for form in self
-            .forms
-            .values()
-            .filter(|form| component_matches(&form.resource, component))
-        {
-            let res = &form.resource;
-            out.push_str(&format!(
-                "{pad}    (\"data-hemx-form\", {}, {}),\n",
-                rust_str(&res.ident),
-                res.id
-            ));
-        }
-        for res in self
-            .atoms
-            .values()
-            .filter(|res| component_matches(res, component))
-        {
-            out.push_str(&format!(
-                "{pad}    (\"data-hemx-atom\", {}, {}),\n",
-                rust_str(&res.ident),
-                res.id
-            ));
-        }
-        out.push_str(&format!("{pad}];\n"));
-    }
-
-    fn push_lowering_helpers(&self, out: &mut String) {
-        out.push_str(r#"
-fn __hemx_lower_html(html: &str, table: &[(&str, &str, u32)]) -> ::std::string::String {
-    let mut out = html.to_owned();
-    for (attr, name, id) in table {
-        let runtime_attr = match *attr {
-            "data-hemx-slot" => "data-sid",
-            "data-hemx-handle" => "data-hid",
-            "data-hemx-form" => "data-fid",
-            "data-hemx-revealed" => "data-hemx-revealed",
-            "data-hemx-atom" => "data-aid",
-            _ => continue,
-        };
-        out = __hemx_replace_attr(out, attr, name, runtime_attr, *id);
-    }
-    out = __hemx_lower_static_attr(out, "data-hemx-key", "data-key");
-    out = __hemx_lower_static_attr(out, "h-key", "data-key");
-    __hemx_inject_handle_inputs(out)
-}
-
-fn __hemx_replace_attr(mut html: ::std::string::String, attr: &str, name: &str, runtime_attr: &str, id: u32) -> ::std::string::String {
-    let replacement = if runtime_attr == "value" {
-        ::std::format!("{attr}=\"{name}\" {runtime_attr}=\"{id}\"")
-    } else {
-        ::std::format!("{runtime_attr}=\"{id}\"")
-    };
-    let double = ::std::format!("{attr}=\"{name}\"");
-    html = html.replace(&double, &replacement);
-    let single_replacement = replacement.replace('"', "'");
-    let single = ::std::format!("{attr}='{name}'");
-    html.replace(&single, &single_replacement)
-}
-
-fn __hemx_lower_static_attr(mut html: ::std::string::String, attr: &str, runtime_attr: &str) -> ::std::string::String {
-    html = html.replace(&::std::format!("{attr}=\""), &::std::format!("{runtime_attr}=\""));
-    html.replace(&::std::format!("{attr}='"), &::std::format!("{runtime_attr}='"))
-}
-
-fn __hemx_inject_handle_inputs(html: ::std::string::String) -> ::std::string::String {
-    let mut out = ::std::string::String::with_capacity(html.len());
-    let mut rest = html.as_str();
-    while let Some(start) = rest.find("<form") {
-        out.push_str(&rest[..start]);
-        rest = &rest[start..];
-        let Some(open_end) = rest.find('>') else {
-            out.push_str(rest);
-            return out;
-        };
-        let opening = &rest[..=open_end];
-        out.push_str(opening);
-        rest = &rest[open_end + 1..];
-
-        let Some(handle_id) = __hemx_attr(opening, "data-hid") else {
-            continue;
-        };
-        let form_body_end = rest.find("</form>").unwrap_or(rest.len());
-        let form_body = &rest[..form_body_end];
-        if !__hemx_has_handle_input(form_body) {
-            out.push_str(&::std::format!("<input type=\"hidden\" name=\"__h\" value=\"{}\">", handle_id));
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-fn __hemx_has_handle_input(html: &str) -> bool {
-    html.contains("name=\"__h\"") || html.contains("name='__h'")
-}
-
-fn __hemx_attr(tag: &str, attr: &str) -> Option<::std::string::String> {
-    let attr_at = tag.find(attr)?;
-    let after_attr = &tag[attr_at + attr.len()..];
-    let after_equals = after_attr.trim_start().strip_prefix('=')?.trim_start();
-    let quote = after_equals.chars().next()?;
-    if quote != '\"' && quote != '\'' {
-        return None;
-    }
-    let value = &after_equals[quote.len_utf8()..];
-    let end = value.find(quote)?;
-    Some(value[..end].to_owned())
-}
-"#);
-    }
-
-    fn component_names(&self) -> Vec<String> {
-        let mut components = Vec::new();
-        for component in self
-            .slots
-            .values()
-            .map(|res| &res.component)
-            .chain(self.handles.values().map(|res| &res.component))
-            .chain(self.atoms.values().map(|res| &res.component))
-            .chain(self.forms.values().map(|form| &form.resource.component))
-            .chain(self.classes.values().map(|class| &class.component))
-            .chain(self.events.values().map(|event| &event.component))
-        {
-            if !components.contains(component) {
-                components.push(component.clone());
-            }
-        }
-        components.sort();
-        components
-    }
-
-    fn syms(&self) -> String {
-        let mut out = String::from("hemx-syms-v1\n");
-        for res in self.slots.values() {
-            out.push_str(&format!(
-                "slot\t{}\t{}\t{}\n",
-                res.symbol, res.ident, res.id
-            ));
-        }
-        for res in self.handles.values() {
-            out.push_str(&format!(
-                "handle\t{}\t{}\t{}\n",
-                res.symbol, res.ident, res.id
-            ));
-        }
-        for form in self.forms.values() {
-            let res = &form.resource;
-            out.push_str(&format!(
-                "form\t{}\t{}\t{}\n",
-                res.symbol, res.ident, res.id
-            ));
-        }
-        for (handle_ident, form_ident) in &self.handle_forms {
-            out.push_str(&format!("handle_form\t{handle_ident}\t{form_ident}\n"));
-        }
-        for form in self.forms.values() {
-            let mut fields = BTreeMap::<&str, (bool, bool)>::new();
-            for control in &form.controls {
-                let field = fields.entry(&control.name).or_default();
-                field.0 |= control.required;
-                field.1 |= form_control_is_multiple(&control.kind);
-            }
-            for (name, (required, multiple)) in fields {
-                out.push_str(&format!(
-                    "form_field\t{}\t{name}\t{required}\t{multiple}\n",
-                    form.resource.ident
-                ));
-            }
-        }
-        for (handle_ident, params) in &self.handle_params {
-            for param in params {
-                out.push_str(&format!("handle_param\t{handle_ident}\t{param}\n"));
-            }
-        }
-        for res in self.atoms.values() {
-            out.push_str(&format!(
-                "atom\t{}\t{}\t{}\n",
-                res.symbol, res.ident, res.id
-            ));
-        }
-        for class in self.classes.values() {
-            out.push_str(&format!(
-                "class\t{}\t{}\t{}\n",
-                class.symbol, class.ident, class.token
-            ));
-        }
-        for event in self.events.values() {
-            out.push_str(&format!(
-                "event\t{}\t{}\t{}\n",
-                event.symbol, event.ident, event.name
-            ));
-        }
-        out
-    }
-
-    fn fingerprint_parts(&self) -> Vec<u32> {
-        let mut parts = vec![
-            SURFACE_SCHEMA_VERSION,
-            EFFECT_BATCH_ABI_VERSION,
-            RUNTIME_ABI_VERSION,
-        ];
-
-        for res in self.slots.values() {
-            parts.push(0);
-            parts.push(res.id);
-        }
-        for res in self.handles.values() {
-            parts.push(1);
-            parts.push(res.id);
-        }
-        for res in self.atoms.values() {
-            parts.push(3);
-            parts.push(res.id);
-        }
-        for form in self.forms.values() {
-            parts.push(2);
-            parts.push(form.resource.id);
-            parts.push(form.controls.len() as u32);
-            for control in &form.controls {
-                parts.push(stable_id("form-field", &control.name));
-                parts.push(control.required as u32);
-            }
-        }
-
-        parts
-    }
-}
-
-fn insert_resource<'a>(
-    map: &'a mut BTreeMap<String, Resource>,
-    kind: &str,
-    symbol: String,
-    name: String,
-    component: String,
-) -> io::Result<&'a mut Resource> {
-    let resource = make_resource(kind, symbol, name, component)?;
-    match map.entry(resource.ident.clone()) {
-        std::collections::btree_map::Entry::Occupied(entry)
-            if entry.get().symbol != resource.symbol =>
-        {
-            let existing = entry.get();
-            Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "duplicate generated identifier `{}` for `{}` and `{}`",
-                    resource.ident, existing.symbol, resource.symbol
-                ),
-            ))
-        }
-        std::collections::btree_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
-        std::collections::btree_map::Entry::Vacant(entry) => Ok(entry.insert(resource)),
-    }
-}
-
-fn make_resource(
-    kind: &str,
-    symbol: String,
-    name: String,
-    component: String,
-) -> io::Result<Resource> {
-    let ident = rust_ident(&name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid hemx {kind} name `{name}`; expected a Rust identifier"),
-        )
-    })?;
-    let id = stable_id(kind, &symbol);
-    Ok(Resource {
-        symbol,
-        ident,
-        component,
-        keyed: false,
-        id,
-    })
-}
-
-fn collect_input_files(root: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
-    if !root.exists() {
-        return Ok(paths);
-    }
-    collect_input_files_into(root, &mut paths)?;
-    paths.sort();
-    Ok(paths)
-}
-
-fn collect_input_files_into(dir: &Path, paths: &mut Vec<PathBuf>) -> io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            collect_input_files_into(&path, paths)?;
-        } else {
-            paths.push(path);
-        }
-    }
-    Ok(())
-}
-
-fn static_attr(attrs: &[SurfaceAttribute], name: &str) -> Option<String> {
-    attrs
-        .iter()
-        .find(|attr| attr.origin == AttributeOrigin::Static && attr.name == name)
-        .and_then(|attr| attr.value.clone())
-}
-
-fn push_root_export(
-    out: &mut String,
-    pad: &str,
-    module: &str,
-    used: &mut BTreeSet<String>,
-    ident: &str,
-    suffix: &str,
-) {
-    if used.insert(ident.to_owned()) {
-        out.push_str(&format!("{pad}pub use self::{module}::{ident};\n"));
-        return;
-    }
-    let alias = format!("{ident}_{suffix}");
-    if used.insert(alias.clone()) {
-        out.push_str(&format!(
-            "{pad}pub use self::{module}::{ident} as {alias};\n"
-        ));
-    }
-}
-
-fn component_matches(res: &Resource, component: Option<&str>) -> bool {
-    match component {
-        Some(component) => res.component == component,
-        None => true,
-    }
-}
-
-fn class_matches(class: &ClassToken, component: Option<&str>) -> bool {
-    match component {
-        Some(component) => class.component == component,
-        None => true,
-    }
-}
-
-fn event_matches(event: &EventToken, component: Option<&str>) -> bool {
-    match component {
-        Some(component) => event.component == component,
-        None => true,
-    }
-}
-
-fn class_tokens(value: &str) -> impl Iterator<Item = &str> {
-    value
-        .split_ascii_whitespace()
-        .filter(|token| !token.is_empty())
-}
-
-fn event_tokens(value: &str) -> impl Iterator<Item = &str> {
-    value
-        .split_ascii_whitespace()
-        .filter(|token| !token.is_empty())
-}
-
-fn stylesheet_class_tokens(source: &str) -> Vec<&str> {
-    let bytes = source.as_bytes();
-    let mut tokens = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != b'.' {
-            i += 1;
-            continue;
-        }
-        let prev = i.checked_sub(1).map(|idx| bytes[idx]);
-        if prev.is_some_and(|ch| ch == b'-' || ch == b'_' || ch.is_ascii_alphanumeric())
-            && !preceded_by_class_in_compound(bytes, i)
-        {
-            i += 1;
-            continue;
-        }
-        let start = i + 1;
-        if start >= bytes.len() || !is_class_start(bytes[start]) {
-            i += 1;
-            continue;
-        }
-        let mut end = start;
-        while end < bytes.len() && is_class_continue(bytes[end]) {
-            end += 1;
-        }
-        if let Ok(token) = std::str::from_utf8(&bytes[start..end]) {
-            tokens.push(token);
-        }
-        i = end;
-    }
-    tokens.sort_unstable();
-    tokens.dedup();
-    tokens
-}
-
-fn preceded_by_class_in_compound(bytes: &[u8], dot: usize) -> bool {
-    let mut i = dot;
-    while let Some(prev) = i.checked_sub(1) {
-        let byte = bytes[prev];
-        if byte == b'.' {
-            return true;
-        }
-        if matches!(
-            byte,
-            b' ' | b'\n' | b'\r' | b'\t' | b',' | b'{' | b'}' | b'>' | b'+' | b'~' | b'(' | b')'
-        ) {
-            return false;
-        }
-        i = prev;
-    }
-    false
-}
-
-fn is_class_start(byte: u8) -> bool {
-    byte == b'_' || byte == b'-' || byte.is_ascii_alphabetic()
-}
-
-fn is_class_continue(byte: u8) -> bool {
-    is_class_start(byte) || byte.is_ascii_digit()
-}
-
-fn class_ident(token: &str) -> Option<String> {
-    rust_ident(&token.replace('-', "_"))
-}
-
-fn is_handle_param_attr(attr: &SurfaceAttribute) -> bool {
-    matches!(
-        attr.origin,
-        AttributeOrigin::Static | AttributeOrigin::Dynamic
-    ) && attr.name.starts_with("data-")
-        && !attr.name.starts_with("data-hemx-")
-}
-
-fn data_param_ident(name: &str) -> Option<String> {
-    let data_name = name.strip_prefix("data-")?;
-    rust_ident(&data_name.replace('-', "_"))
-}
-
-fn can_host_keyed_collection(tag: &str) -> bool {
-    matches!(
-        tag,
-        "ul" | "ol" | "tbody" | "thead" | "tfoot" | "table" | "select" | "datalist"
-    )
-}
-
-fn has_descendant_keyed_for_scope(surface: &SurfaceDocument, scope: ScopeId) -> bool {
-    surface.scopes.iter().enumerate().any(|(index, current)| {
-        matches!(
-            current.kind,
-            ScopeKind::For {
-                key_expr: Some(_),
-                ..
-            }
-        ) && is_descendant_scope(surface, ScopeId(index as u32), scope)
-    })
-}
-
-fn is_descendant_scope(surface: &SurfaceDocument, mut scope: ScopeId, ancestor: ScopeId) -> bool {
-    loop {
-        let Some(current) = surface.scopes.get(scope.0 as usize) else {
-            return false;
-        };
-        let Some(parent) = current.parent else {
-            return false;
-        };
-        if parent == ancestor {
-            return true;
-        }
-        scope = parent;
-    }
-}
-
-fn is_inside_keyed_for(surface: &SurfaceDocument, mut scope: ScopeId) -> bool {
-    loop {
-        let Some(current) = surface.scopes.get(scope.0 as usize) else {
-            return false;
-        };
-        if matches!(
-            current.kind,
-            ScopeKind::For {
-                key_expr: Some(_),
-                ..
-            }
-        ) {
-            return true;
-        }
-        let Some(parent) = current.parent else {
-            return false;
-        };
-        scope = parent;
-    }
-}
-
-fn reject_selector_target_attrs(path: &Path, attrs: &[SurfaceAttribute]) -> io::Result<()> {
-    for attr in attrs {
-        let name = attr.name.as_str();
-        if matches!(name, "data-hemx-target" | "data-hemx-select") {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{}: `{name}` is selector-style targeting; hemx uses generated resources instead. Add data-hemx-slot to the local element and return an effect for that generated slot.",
-                    path.display()
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn reject_unknown_hemx_attrs(path: &Path, attrs: &[SurfaceAttribute]) -> io::Result<()> {
-    for attr in attrs {
-        let name = attr.name.as_str();
-        if name.starts_with("data-hemx-") && !known_hemx_attr(name) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{}: unknown hemx attribute `{name}`; check the spelling or use a non-hemx data-* attribute for app-specific metadata",
-                    path.display()
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn known_hemx_attr(name: &str) -> bool {
-    matches!(
-        name,
-        "data-hemx-root"
-            | "data-hemx-sse"
-            | "data-hemx-ws"
-            | "data-hemx-st"
-            | "data-hemx-handle"
-            | "data-hemx-slot"
-            | "data-hemx-form"
-            | "data-hemx-atom"
-            | "data-hemx-key"
-            | "data-hemx-on"
-            | "data-hemx-pending-class"
-            | "data-hemx-indicator"
-            | "data-hemx-confirm"
-            | "data-hemx-debounce"
-            | "data-hemx-delay"
-            | "data-hemx-throttle"
-            | "data-hemx-every"
-            | "data-hemx-interval"
-            | "data-hemx-revealed"
-            | "data-hemx-revealed-ahead"
-            | "data-hemx-disable-while-pending"
-            | "data-hemx-policy"
-            | "data-hemx-nav"
-            | "data-hemx-history"
-            | "data-hemx-boost"
-            | "data-hemx-error-for"
-            | "data-hemx-error"
-            | "data-hemx-island"
-    )
-}
-
-fn reject_invalid_hemx_attr_values(path: &Path, attrs: &[SurfaceAttribute]) -> io::Result<()> {
-    for attr in attrs
-        .iter()
-        .filter(|attr| attr.origin == AttributeOrigin::Static)
-    {
-        let value = attr.value.as_deref().unwrap_or("");
-        match attr.name.as_str() {
-            "data-hemx-policy" if !valid_policy(value) => {
-                return Err(invalid_hemx_value(
-                    path,
-                    &attr.name,
-                    value,
-                    "expected one of `latest`, `queue`, `drop`, or `parallel`",
-                ));
-            }
-            "data-hemx-history" if !matches!(value.trim(), "" | "push" | "replace") => {
-                return Err(invalid_hemx_value(
-                    path,
-                    &attr.name,
-                    value,
-                    "expected `push`, `replace`, or empty for the default push behavior",
-                ));
-            }
-            "data-hemx-on" if !valid_event_list(value) => {
-                return Err(invalid_hemx_value(
-                    path,
-                    &attr.name,
-                    value,
-                    "expected runtime-supported events: `click`, `submit`, `input`, `change`, `keydown`, `dragstart`, `dragover`, or `drop`",
-                ));
-            }
-            "data-hemx-confirm" if value.trim().is_empty() => {
-                return Err(invalid_hemx_value(
-                    path,
-                    &attr.name,
-                    value,
-                    "expected a non-empty confirmation message",
-                ));
-            }
-            "data-hemx-sse" if value.trim().is_empty() => {
-                return Err(invalid_hemx_value(
-                    path,
-                    &attr.name,
-                    value,
-                    "expected a non-empty same-origin SSE URL",
-                ));
-            }
-            "data-hemx-ws" if value.trim().is_empty() => {
-                return Err(invalid_hemx_value(
-                    path,
-                    &attr.name,
-                    value,
-                    "expected a non-empty same-origin WebSocket URL",
-                ));
-            }
-            "data-hemx-revealed-ahead"
-                if !value
-                    .trim()
-                    .parse::<f64>()
-                    .ok()
-                    .is_some_and(|value| value.is_finite() && value >= 0.0) =>
-            {
-                return Err(invalid_hemx_value(
-                    path,
-                    &attr.name,
-                    value,
-                    "expected a non-negative number of viewports",
-                ));
-            }
-            "data-hemx-debounce" | "data-hemx-delay" | "data-hemx-throttle" | "data-hemx-every"
-            | "data-hemx-interval"
-                if !valid_duration(value) =>
-            {
-                return Err(invalid_hemx_value(
-                    path,
-                    &attr.name,
-                    value,
-                    "expected milliseconds like `250`/`250ms` or seconds like `1s`",
-                ));
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn reject_invalid_hemx_attr_placement(
-    path: &Path,
-    tag: &str,
-    attrs: &[SurfaceAttribute],
-) -> io::Result<()> {
-    if has_attr(attrs, "data-hemx-nav")
-        && (tag != "a"
-            || !has_attr(attrs, "href")
-            || static_attr(attrs, "href").is_some_and(|href| href.trim().is_empty()))
-    {
-        return Err(invalid_hemx_placement(
-            path,
-            "data-hemx-nav",
-            "expected a real `<a href=...>` link so navigation works without JavaScript",
-        ));
-    }
-    if has_attr(attrs, "data-hemx-boost") && matches!(tag, "a" | "form") {
-        return Err(invalid_hemx_placement(
-            path,
-            "data-hemx-boost",
-            "expected a container around descendant links/forms; use `data-hemx-nav` on anchors or `data-hemx-handle` on forms",
-        ));
-    }
-    if has_attr(attrs, "data-hemx-sse") && !has_attr(attrs, "data-hemx-root") {
-        return Err(invalid_hemx_placement(
-            path,
-            "data-hemx-sse",
-            "expected placement on the same element as `data-hemx-root`",
-        ));
-    }
-    if has_attr(attrs, "data-hemx-ws") && !has_attr(attrs, "data-hemx-root") {
-        return Err(invalid_hemx_placement(
-            path,
-            "data-hemx-ws",
-            "expected placement on the same element as `data-hemx-root`",
-        ));
-    }
-    Ok(())
-}
-
-fn has_attr(attrs: &[SurfaceAttribute], name: &str) -> bool {
-    attrs.iter().any(|attr| attr.name == name)
-}
-
-fn invalid_hemx_placement(path: &Path, attr: &str, expectation: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!(
-            "{}: invalid {attr} placement; {expectation}",
-            path.display()
-        ),
-    )
-}
-
-fn valid_policy(value: &str) -> bool {
-    matches!(value.trim(), "latest" | "queue" | "drop" | "parallel")
-}
-
-fn valid_event_list(value: &str) -> bool {
-    let mut events = event_tokens(value).peekable();
-    events.peek().is_some() && events.all(valid_runtime_event)
-}
-
-fn valid_runtime_event(value: &str) -> bool {
-    matches!(
-        value,
-        "click" | "submit" | "input" | "change" | "keydown" | "dragstart" | "dragover" | "drop"
-    )
-}
-
-fn valid_duration(value: &str) -> bool {
-    let value = value.trim();
-    let digits = value
-        .strip_suffix("ms")
-        .or_else(|| value.strip_suffix('s'))
-        .unwrap_or(value);
-    !digits.is_empty() && digits.as_bytes().iter().all(u8::is_ascii_digit)
-}
-
-fn invalid_hemx_value(path: &Path, attr: &str, value: &str, expectation: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!(
-            "{}: invalid {attr} value `{value}`; {expectation}",
-            path.display()
-        ),
-    )
-}
-
-fn reject_unkeyed_loop(
-    surface: &SurfaceDocument,
-    scope: ScopeId,
-    path: &Path,
-    kind: &str,
-    name: &str,
-) -> io::Result<()> {
-    if let Some(diagnostic) =
-        unkeyed_generated_target_diagnostic_for_scope(surface, scope, path, kind, name)
-    {
-        Err(diagnostic.to_io_error())
-    } else {
-        Ok(())
-    }
-}
-
-fn context_type_for_heml_path(path: &Path) -> Option<String> {
-    let stem = path.file_stem()?.to_str()?;
-    let mut out = String::new();
-    for word in stem.split(['_', '-']).filter(|word| !word.is_empty()) {
-        let mut chars = word.chars();
-        out.extend(chars.next()?.to_uppercase());
-        out.extend(chars);
-    }
-    (!out.is_empty()).then_some(out)
-}
-
-fn nearest_dir_with(path: &Path, file_name: &str) -> Option<PathBuf> {
-    for dir in path.ancestors().filter(|path| path.is_dir()) {
-        if dir.join(file_name).is_file() {
-            return Some(dir.to_path_buf());
-        }
-    }
-    None
-}
-
-fn rust_struct_facts_in(root: &Path) -> io::Result<HashMap<String, RustStructFact>> {
-    let mut facts = HashMap::new();
-    collect_rust_struct_facts(&root.join("src"), &mut facts)?;
-    Ok(facts)
-}
-
-fn collect_rust_struct_facts(
-    dir: &Path,
-    facts: &mut HashMap<String, RustStructFact>,
-) -> io::Result<()> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Ok(());
-    };
-    for entry in entries {
-        let path = entry?.path();
-        if path.is_dir() {
-            collect_rust_struct_facts(&path, facts)?;
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-            collect_rust_struct_facts_from_file(&path, facts)?;
-        }
-    }
-    Ok(())
-}
-
-fn collect_rust_struct_facts_from_file(
-    path: &Path,
-    facts: &mut HashMap<String, RustStructFact>,
-) -> io::Result<()> {
-    let source = std::fs::read_to_string(path)?;
-    let file = match syn::parse_file(&source) {
-        Ok(file) => file,
-        Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidData, error)),
-    };
-    collect_rust_struct_facts_from_items(&file.items, facts);
-    Ok(())
-}
-
-fn collect_rust_struct_facts_from_items(
-    items: &[syn::Item],
-    facts: &mut HashMap<String, RustStructFact>,
-) {
-    for item in items {
-        match item {
-            syn::Item::Struct(item) => {
-                if let syn::Fields::Named(fields) = &item.fields {
-                    facts.insert(
-                        item.ident.to_string(),
-                        RustStructFact {
-                            fields: fields
-                                .named
-                                .iter()
-                                .map(|field| TemplateFieldFact {
-                                    name: field.ident.as_ref().unwrap().to_string(),
-                                    type_name: compact_tokens(&field.ty),
-                                })
-                                .collect(),
-                            derives_hemplate: derives_hemplate(&item.attrs),
-                        },
-                    );
-                }
-            }
-            syn::Item::Mod(item) => {
-                if let Some((_, items)) = &item.content {
-                    collect_rust_struct_facts_from_items(items, facts);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn derives_hemplate(attrs: &[syn::Attribute]) -> bool {
-    attrs
-        .iter()
-        .filter(|attr| attr.path().is_ident("derive"))
-        .filter_map(|attr| {
-            attr.parse_args_with(
-                syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
-            )
-            .ok()
-        })
-        .flatten()
-        .any(|path| {
-            path.segments
-                .last()
-                .is_some_and(|segment| segment.ident == "Hemplate")
-        })
-}
-
-fn compact_tokens(tokens: &impl ToTokens) -> String {
-    tokens
-        .to_token_stream()
-        .to_string()
-        .replace(" :: ", "::")
-        .replace(" < ", "<")
-        .replace(" >", ">")
-        .replace(" ,", ",")
-        .replace(", ", ",")
-        .replace(" & ", "&")
-        .replace("& ", "&")
-}
-
-fn loop_locals_for_surface(
-    surface: &SurfaceDocument,
-    self_fields: &[TemplateFieldFact],
-    structs: &HashMap<String, RustStructFact>,
-) -> Vec<TemplateLocalFact> {
-    let mut locals = Vec::new();
-    for node in &surface.nodes {
-        let Some(value) = node
-            .attrs
-            .iter()
-            .find(|attr| attr.name == "h-for")
-            .and_then(|attr| attr.value.as_deref())
-        else {
-            continue;
-        };
-        let Some((local, field)) = h_for_local_and_self_field(value) else {
-            continue;
-        };
-        let Some(self_field) = self_fields.iter().find(|candidate| candidate.name == field) else {
-            continue;
-        };
-        let Some(type_name) = vec_element_type(&self_field.type_name) else {
-            continue;
-        };
-        let fields = structs
-            .get(&type_name)
-            .map(|fact| fact.fields.clone())
-            .unwrap_or_default();
-        if !locals
-            .iter()
-            .any(|existing: &TemplateLocalFact| existing.name == local)
-        {
-            locals.push(TemplateLocalFact {
-                name: local,
-                type_name,
-                fields,
-            });
-        }
-    }
-    locals
-}
-
-fn h_for_local_and_self_field(value: &str) -> Option<(String, String)> {
-    let (local, expr) = value.split_once(" in ")?;
-    let local = rust_ident(local.trim())?;
-    let expr = expr.trim().strip_prefix('&').unwrap_or(expr.trim()).trim();
-    let field = expr
-        .strip_prefix("self.")?
-        .split(['.', '(', '['])
-        .next()
-        .filter(|field| !field.is_empty())?;
-    Some((local, field.to_owned()))
-}
-
-fn vec_element_type(type_name: &str) -> Option<String> {
-    let inner = type_name
-        .strip_prefix("Vec<")
-        .or_else(|| type_name.strip_prefix("std::vec::Vec<"))?
-        .strip_suffix('>')?;
-    Some(inner.trim().to_owned())
-}
-
-fn unkeyed_generated_target_diagnostics(path: &Path, surface: &SurfaceDocument) -> Vec<Diagnostic> {
-    let mut diagnostics = Vec::new();
-    for (node_scope, target) in generated_targets_with_scope(surface) {
-        if let Some(diagnostic) = unkeyed_generated_target_diagnostic_for_scope(
-            surface,
-            node_scope,
-            path,
-            &target.kind,
-            &target.name,
-        ) {
-            diagnostics.push(diagnostic);
-        }
-    }
-    diagnostics
-}
-
-fn generated_targets(surface: &SurfaceDocument) -> Vec<GeneratedTarget> {
-    let mut targets = Vec::new();
-    for (_, target) in generated_targets_with_scope(surface) {
-        if !targets.iter().any(|existing: &GeneratedTarget| {
-            existing.kind == target.kind && existing.name == target.name
-        }) {
-            targets.push(target);
-        }
-    }
-    targets
-}
-
-fn generated_targets_with_scope(surface: &SurfaceDocument) -> Vec<(ScopeId, GeneratedTarget)> {
-    let mut targets = Vec::new();
-    for node in &surface.nodes {
-        for attr in &node.attrs {
-            let Some(kind) = attr.name.strip_prefix("data-hemx-") else {
-                continue;
-            };
-            if !matches!(kind, "slot" | "form" | "handle") {
-                continue;
-            }
-            let Some(name) = &attr.value else {
-                continue;
-            };
-            targets.push((
-                node.scope,
-                GeneratedTarget {
-                    kind: kind.to_owned(),
-                    name: name.to_owned(),
-                },
-            ));
-        }
-    }
-    targets
-}
-
-fn unkeyed_generated_target_diagnostic_for_scope(
-    surface: &SurfaceDocument,
-    mut scope: ScopeId,
-    path: &Path,
-    kind: &str,
-    name: &str,
-) -> Option<Diagnostic> {
-    loop {
-        let current = surface.scopes.get(scope.0 as usize)?;
-        if let ScopeKind::For {
-            pattern,
-            expr,
-            key_expr: None,
-        } = &current.kind
-        {
-            return Some(unkeyed_generated_target_diagnostic(
-                path, kind, name, pattern, expr,
-            ));
-        }
-        let parent = current.parent?;
-        scope = parent;
-    }
-}
-
-fn unkeyed_generated_target_diagnostic(
-    path: &Path,
-    kind: &str,
-    name: &str,
-    pattern: &str,
-    expr: &str,
-) -> Diagnostic {
-    Diagnostic {
-        code: DiagnosticCode::UnkeyedGeneratedTarget,
-        severity: DiagnosticSeverity::Error,
-        file: path.to_path_buf(),
-        directive: format!("data-hemx-{kind}"),
-        target: name.to_owned(),
-        message: format!(
-            "data-hemx-{kind}=\"{name}\" is inside h-for=\"{pattern} in {expr}\" without h-key"
-        ),
-        expected: format!(
-            "a stable template h-key on h-for=\"{pattern} in {expr}\" so generated keyed helpers such as ui::{name}.replace(row) can target this partial"
-        ),
-        repair: format!(
-            "add h-key=\"{pattern}.id\" to that h-for; dynamic +data-key on the child is rendered HTML, not the template fact hemx uses for generated targets"
-        ),
-    }
-}
-
-fn canonical_symbol(root: &Path, path: &Path, name: &str) -> String {
-    let rel = path.strip_prefix(root).unwrap_or(path);
-    format!("{}::{name}", rel.to_string_lossy().replace('\\', "/"))
-}
-
-fn component_ident(root: &Path, path: &Path) -> io::Result<String> {
-    let rel = path.strip_prefix(root).unwrap_or(path);
-    let stem = rel
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("invalid template path `{}`", path.display()),
-            )
-        })?;
-    rust_ident(stem).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid template name `{stem}`; expected a Rust module identifier"),
-        )
-    })
-}
-
-fn rust_ident(name: &str) -> Option<String> {
-    let mut chars = name.chars();
-    let first = chars.next()?;
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        return None;
-    }
-    if chars
-        .clone()
-        .any(|ch| !(ch == '_' || ch.is_ascii_alphanumeric()))
-    {
-        return None;
-    }
-    Some(name.to_string())
-}
-
-fn stable_id(kind: &str, symbol: &str) -> u32 {
-    let mut hash = 0x811c9dc5u32;
-    for byte in kind.bytes().chain(*b":").chain(symbol.bytes()) {
-        hash ^= byte as u32;
-        hash = hash.wrapping_mul(0x01000193);
-    }
-    hash
-}
-
-fn form_control_is_multiple(kind: &ControlKind) -> bool {
-    matches!(kind, ControlKind::Select { multiple: true })
-}
-
-fn form_control_kind_expr(kind: &ControlKind) -> String {
-    match kind {
-        ControlKind::Text => "::hemx::FormControlKind::Text".to_string(),
-        ControlKind::Number { min, max, step } => format!(
-            "::hemx::FormControlKind::Number {{ min: {}, max: {}, step: {} }}",
-            rust_str_opt(min.as_deref()),
-            rust_str_opt(max.as_deref()),
-            rust_str_opt(step.as_deref())
-        ),
-        ControlKind::Checkbox => "::hemx::FormControlKind::Checkbox".to_string(),
-        ControlKind::Radio => "::hemx::FormControlKind::Radio".to_string(),
-        ControlKind::Select { multiple } => {
-            format!("::hemx::FormControlKind::Select {{ multiple: {multiple} }}")
-        }
-        ControlKind::TextArea => "::hemx::FormControlKind::TextArea".to_string(),
-        ControlKind::File => "::hemx::FormControlKind::File".to_string(),
-        ControlKind::Hidden => "::hemx::FormControlKind::Hidden".to_string(),
-        ControlKind::Submit => "::hemx::FormControlKind::Submit".to_string(),
-        ControlKind::Other { tag, input_type } => format!(
-            "::hemx::FormControlKind::Other {{ tag: {}, input_type: {} }}",
-            rust_str(tag),
-            rust_str_opt(input_type.as_deref())
-        ),
-    }
-}
-
-fn rust_str(value: &str) -> String {
-    format!("{value:?}")
-}
-
-fn rust_str_opt(value: Option<&str>) -> String {
-    match value {
-        Some(value) => format!("Some({})", rust_str(value)),
-        None => "None".to_string(),
-    }
-}
-
-fn parse_error(path: &Path, err: impl std::fmt::Display) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("failed to parse {}: {err}", path.display()),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact::*;
 
     static OUT_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -2456,10 +589,9 @@ mod tests {
             io::ErrorKind::InvalidData
         );
 
-        for (kind, source) in [
-            ("atom", r#"<span data-hemx-atom="shared"></span>"#),
-            ("handle", r#"<button data-hemx-handle="shared"></button>"#),
-        ] {
+        let kind = "handle";
+        let source = r#"<button data-hemx-handle="shared"></button>"#;
+        {
             let first =
                 surface_for_heml_source(Path::new("first.heml"), source.to_owned()).unwrap();
             let second =
@@ -2530,9 +662,6 @@ mod tests {
         resources
             .handles
             .insert("save".into(), resource("save", "page", 12));
-        resources
-            .atoms
-            .insert("count".into(), resource("count", "page", 13));
         resources.forms.insert(
             "profile".into(),
             FormResource {
@@ -2560,8 +689,6 @@ mod tests {
             11,
             1,
             12,
-            3,
-            13,
             2,
             14,
             2,
@@ -2580,7 +707,6 @@ mod tests {
         ));
         assert!(generated.contains("pub const slot: SlotTarget"));
         assert!(generated.contains("pub const save: ::hemx::Handle"));
-        assert!(generated.contains("pub const count: ::hemx::Atom"));
         assert!(generated.contains("pub const profile: ::hemx::Form"));
         assert!(generated.contains("\n    pub mod targets {\n"));
 
@@ -2594,9 +720,6 @@ mod tests {
         resources
             .handles
             .insert("edit".into(), resource("edit", "row", 22));
-        resources
-            .atoms
-            .insert("selection".into(), resource("selection", "row", 23));
         resources
             .slots
             .insert("child".into(), resource("child", "page", 24));
@@ -2655,17 +778,17 @@ mod tests {
         let canonical_syms = resources.syms();
         assert_eq!(
             stable_id("generated-rs", &canonical_generated),
-            262_445_078,
+            2_865_325_407,
             "canonical generated Rust changed"
         );
         assert_eq!(
             stable_id("generated-rs-global", &canonical_globals),
-            3_211_924_671,
+            3_814_759_598,
             "canonical global-export Rust changed"
         );
         assert_eq!(
             stable_id("generated-syms", &canonical_syms),
-            984_222_700,
+            2_299_561_723,
             "canonical symbol manifest changed"
         );
     }
@@ -2957,7 +1080,7 @@ mod tests {
         std::fs::create_dir_all(&templates).unwrap();
         std::fs::write(
             templates.join("todo.heml"),
-            r#"<form class="todo-card" data-hemx-handle="create" data-hemx-form="new_todo"><input name="title" required><select name="labels" multiple><option value="urgent">Urgent</option></select><input name="__h" value="reserved"></form><button data-hemx-handle="delete" data-todo-id="7" data-hemx-on="click change">Delete</button><ul data-hemx-slot="todos"></ul><section data-hemx-atom="filter"></section>"#,
+            r#"<form class="todo-card" data-hemx-handle="create" data-hemx-form="new_todo"><input name="title" required><select name="labels" multiple><option value="urgent">Urgent</option></select><input name="__h" value="reserved"></form><button data-hemx-handle="delete" data-todo-id="7" data-hemx-on="click change">Delete</button><ul data-hemx-slot="todos"></ul>"#,
         )
         .unwrap();
         std::fs::write(templates.join("todo.css"), ".todo-card { display: block; }").unwrap();
@@ -3008,8 +1131,6 @@ mod tests {
             "pub const todo_id: ::hemx::ParamName = ::hemx::ParamName::new(\"todo_id\")"
         ));
         assert!(generated.contains("pub mod forms"));
-        assert!(generated.contains("pub mod atoms"));
-        assert!(generated.contains("pub const filter"));
         assert!(generated.contains("pub mod events"));
         assert!(generated
             .contains("pub const click: ::hemx::EventName = ::hemx::EventName::new(\"click\")"));
@@ -3036,8 +1157,9 @@ mod tests {
         assert!(generated.contains("pub fn replace<K, T>(slot: ::hemx::advanced::KeyedSlot<K, T>, key: K, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect"));
         assert!(generated.contains("data-hemx-slot"));
         assert!(generated.contains("data-hemx-form"));
-        assert!(generated.contains("data-sid"));
-        assert!(generated.contains("data-fid"));
+        assert!(generated.contains("data-hemx-resource"));
+        assert!(!generated.contains("data-sid"));
+        assert!(!generated.contains("data-fid"));
         assert!(generated.contains("__hemx_inject_handle_inputs"));
 
         let syms = std::fs::read_to_string(out.join("hemx.syms")).unwrap();
@@ -3062,10 +1184,6 @@ mod tests {
             "form_field\tnew_todo\tlabels\tfalse\ttrue\n".to_owned(),
             "form_field\tnew_todo\ttitle\ttrue\tfalse\n".to_owned(),
             "handle_param\tdelete\ttodo_id\n".to_owned(),
-            format!(
-                "atom\ttodo.heml::filter\tfilter\t{}\n",
-                stable_id("atom", "todo.heml::filter")
-            ),
             "class\ttodo.css::todo-card\ttodo_card\ttodo-card\n".to_owned(),
             "class\ttodo.heml::todo-card\ttodo_card\ttodo-card\n".to_owned(),
             "event\ttodo.heml::change\tchange\tchange\n".to_owned(),
@@ -3224,7 +1342,7 @@ mod tests {
         std::fs::create_dir_all(&templates).unwrap();
         std::fs::write(
             templates.join("todos.heml"),
-            r#"<ul data-hemx-slot="row"><template h-for="todo in &self.todos" h-key="todo.id"><li +data-key="todo.id">{+ todo +}</li></template></ul>"#,
+            r#"<ul data-hemx-slot="row"><template h-for="todo in &self.todos" h-key="todo.id"><li +data-hemx-key="todo.id">{+ todo +}</li></template></ul>"#,
         )
         .unwrap();
 
@@ -3465,6 +1583,8 @@ mod hemx {{
     impl BuildFingerprint {{ pub const fn from_parts(_: &[u32]) -> Self {{ Self }} }}
     pub struct Effect;
     #[derive(Clone, Copy)] pub struct ResourceId;
+    #[derive(Clone, Copy)] pub struct EventName(&'static str);
+    impl EventName {{ pub const fn new(name: &'static str) -> Self {{ Self(name) }} }}
     pub trait IntoEffect {{}}
     impl IntoEffect for Effect {{}}
     pub trait GeneratedTarget {{ fn __hemx_resource_id(self) -> ResourceId; }}
@@ -3475,8 +1595,6 @@ mod hemx {{
     impl<K, T> KeyedSlot<K, T> {{ pub const fn new(_: u32) -> Self {{ Self(::std::marker::PhantomData) }} pub const fn id(self) -> ResourceId {{ ResourceId }} pub fn append_html(self, _: K, _: impl ::std::convert::Into<SafeHtml>) -> Effect {{ Effect }} pub fn prepend_html(self, _: K, _: impl ::std::convert::Into<SafeHtml>) -> Effect {{ Effect }} pub fn replace_html(self, _: K, _: impl ::std::convert::Into<SafeHtml>) -> Effect {{ Effect }} pub fn remove(self, _: K) -> Effect {{ Effect }} pub fn move_before(self, _: K, _: K) -> Effect {{ Effect }} pub fn move_to_end(self, _: K) -> Effect {{ Effect }} }}
     #[derive(Clone, Copy)] pub struct Handle<T>(::std::marker::PhantomData<T>);
     impl<T> Handle<T> {{ pub const fn new(_: u32) -> Self {{ Self(::std::marker::PhantomData) }} }}
-    #[derive(Clone, Copy)] pub struct Atom<T>(::std::marker::PhantomData<T>);
-    impl<T> Atom<T> {{ pub const fn new(_: u32) -> Self {{ Self(::std::marker::PhantomData) }} }}
     #[derive(Clone, Copy)] pub struct Form<T>(::std::marker::PhantomData<T>);
     impl<T> Form<T> {{ pub const fn new(_: u32) -> Self {{ Self(::std::marker::PhantomData) }} }}
     #[derive(Clone, Copy)] pub struct CssClass(&'static str);
@@ -3722,7 +1840,9 @@ fn main() {{
             .contains("h-for=\"todo in &self.todos\" without h-key"));
         assert!(diagnostic.expected.contains("ui::todo_row.replace(row)"));
         assert!(diagnostic.repair.contains("h-key=\"todo.id\""));
-        assert!(diagnostic.repair.contains("dynamic +data-key on the child"));
+        assert!(diagnostic
+            .repair
+            .contains("dynamic +data-hemx-key on the child"));
         assert!(diagnostic.to_string().contains("templates/todo.heml"));
     }
 
@@ -3737,7 +1857,7 @@ fn main() {{
             ),
             (
                 "slot_data_key",
-                r#"<template h-for="todo in &self.todos"><li data-hemx-slot="todo_row" +data-key="todo.id">{+ todo.title +}</li></template>"#,
+                r#"<template h-for="todo in &self.todos"><li data-hemx-slot="todo_row" +data-hemx-key="todo.id">{+ todo.title +}</li></template>"#,
                 "data-hemx-slot=\"todo_row\"",
                 "ui::todo_row",
             ),
@@ -3752,12 +1872,6 @@ fn main() {{
                 r#"<template h-for="todo in &self.todos"><template h-if="todo.visible"><button data-hemx-handle="delete">Delete</button></template></template>"#,
                 "data-hemx-handle=\"delete\"",
                 "ui::delete",
-            ),
-            (
-                "atom",
-                r#"<template h-for="todo in &self.todos"><span data-hemx-atom="selected">Selected</span></template>"#,
-                "data-hemx-atom=\"selected\"",
-                "ui::selected",
             ),
         ] {
             let base = test_dir(&format!("hemx-build-unkeyed-for-{case}-test"));
@@ -3778,7 +1892,7 @@ fn main() {{
             assert!(err.contains("h-key=\"todo.id\""));
             assert!(err.contains("generated keyed helpers"));
             assert!(err.contains(helper));
-            assert!(err.contains("dynamic +data-key on the child"));
+            assert!(err.contains("dynamic +data-hemx-key on the child"));
 
             let _ = std::fs::remove_dir_all(&base);
         }
@@ -3795,7 +1909,6 @@ fn main() {{
                         <li data-hemx-slot="todo_row">
                             <template h-for="child in &todo.children" h-key="child.id">
                                 <button data-hemx-handle="delete">Delete</button>
-                                <span data-hemx-atom="selected">Selected</span>
                             </template>
                         </li>
                     </template>
@@ -3810,7 +1923,6 @@ fn main() {{
         assert!(syms.contains("slot\ttodo.heml::todos\ttodos\t"));
         assert!(syms.contains("slot\ttodo.heml::todo_row\ttodo_row\t"));
         assert!(syms.contains("handle\ttodo.heml::delete\tdelete\t"));
-        assert!(syms.contains("atom\ttodo.heml::selected\tselected\t"));
         assert!(syms.contains("slot\ttodo.heml::summary\tsummary\t"));
         let generated = std::fs::read_to_string(out.join("hemx.generated.rs")).unwrap();
         assert!(generated.contains("pub const todo_row: ::hemx::advanced::KeyedSlot"));
@@ -3986,12 +2098,6 @@ fn main() {{
                 "non-empty",
             ),
             (
-                "delay-empty",
-                r#"<button data-hemx-handle="save" data-hemx-delay="">Save</button>"#,
-                "data-hemx-delay",
-                "milliseconds",
-            ),
-            (
                 "revealed-ahead-negative",
                 r#"<form data-hemx-revealed data-hemx-revealed-ahead="-1"></form>"#,
                 "data-hemx-revealed-ahead",
@@ -4004,12 +2110,6 @@ fn main() {{
                 "milliseconds",
             ),
             (
-                "duration-suffix-only",
-                r#"<button data-hemx-handle="save" data-hemx-delay="s">Save</button>"#,
-                "data-hemx-delay",
-                "milliseconds",
-            ),
-            (
                 "policy-duplicate-anchor",
                 r#"<button data-hemx-handle="save" data-hemx-policy="newest">Save</button>"#,
                 "data-hemx-policy",
@@ -4019,12 +2119,6 @@ fn main() {{
                 "debounce",
                 r#"<button data-hemx-handle="save" data-hemx-debounce="soon">Save</button>"#,
                 "data-hemx-debounce",
-                "250ms",
-            ),
-            (
-                "delay",
-                r#"<button data-hemx-handle="save" data-hemx-delay="soon">Save</button>"#,
-                "data-hemx-delay",
                 "250ms",
             ),
             (
@@ -4103,8 +2197,8 @@ fn main() {{
                 "data-hemx-confirm" => "expected a non-empty confirmation message",
                 "data-hemx-sse" => "expected a non-empty same-origin SSE URL",
                 "data-hemx-ws" => "expected a non-empty same-origin WebSocket URL",
-                "data-hemx-debounce" | "data-hemx-delay" | "data-hemx-throttle"
-                | "data-hemx-every" | "data-hemx-interval" => {
+                "data-hemx-debounce" | "data-hemx-throttle" | "data-hemx-every"
+                | "data-hemx-interval" => {
                     "expected milliseconds like `250`/`250ms` or seconds like `1s`"
                 }
                 _ => panic!("missing expectation for {attr}"),
@@ -4124,53 +2218,10 @@ fn main() {{
     }
 
     #[test]
-    fn static_attribute_value_validators_cover_every_boundary() {
-        for valid in ["latest", " queue ", "drop", "parallel"] {
-            assert!(valid_policy(valid), "rejected policy {valid:?}");
-        }
-        for invalid in ["", "newest", "latest queue", "LATEST"] {
-            assert!(!valid_policy(invalid), "accepted policy {invalid:?}");
-        }
-
-        for valid in [
-            "click",
-            "submit input change keydown dragstart dragover drop",
-            " click change ",
-        ] {
-            assert!(valid_event_list(valid), "rejected event list {valid:?}");
-        }
-        for invalid in ["", " ", "blur", "click blur"] {
-            assert!(
-                !valid_event_list(invalid),
-                "accepted event list {invalid:?}"
-            );
-        }
-        for valid in [
-            "click",
-            "submit",
-            "input",
-            "change",
-            "keydown",
-            "dragstart",
-            "dragover",
-            "drop",
-        ] {
-            assert!(valid_runtime_event(valid), "rejected event {valid:?}");
-        }
-        for invalid in ["", "blur", "Click"] {
-            assert!(!valid_runtime_event(invalid), "accepted event {invalid:?}");
-        }
-
-        for valid in ["0", "250", "250ms", "1s", " 5s "] {
-            assert!(valid_duration(valid), "rejected duration {valid:?}");
-        }
-        for invalid in ["", " ", "ms", "s", "-1", "1sec", "1.5s", "1 ms"] {
-            assert!(!valid_duration(invalid), "accepted duration {invalid:?}");
-        }
-
+    fn static_attribute_values_integrate_with_template_inspection() {
         let valid_source = r#"
             <main data-hemx-root="app" data-hemx-sse="/events" data-hemx-ws="/room/socket">
-                <button data-hemx-handle="save" data-hemx-policy="latest" data-hemx-on="click change" data-hemx-confirm="Save?" data-hemx-delay="250ms" data-hemx-throttle="1s">Save</button>
+                <button data-hemx-handle="save" data-hemx-policy="latest" data-hemx-on="click change" data-hemx-confirm="Save?" data-hemx-debounce="250ms" data-hemx-throttle="1s">Save</button>
                 <form method="get" action="/search" data-hemx-history="replace"><input name="q"></form>
             </main>
         "#;
@@ -4282,7 +2333,7 @@ fn main() {{
     }
 
     #[test]
-    fn generated_lowering_injects_progressive_form_handle_and_key() {
+    fn generated_lowering_preserves_native_interaction_contract() {
         let base = test_dir("hemx-build-lowering-test");
         let templates = base.join("templates");
         let out = base.join("out");
@@ -4290,7 +2341,7 @@ fn main() {{
         std::fs::create_dir_all(&templates).unwrap();
         std::fs::write(
             templates.join("todo.heml"),
-            r#"<form data-hemx-handle="create"><input name="title"></form><li data-hemx-slot="row" data-hemx-key="7"></li>"#,
+            r#"<main data-hemx-root><a href="/docs">Docs</a><form action="/todos" method="post" data-hemx-handle="create"><label for="title">Title</label><input id="title" name="title" aria-invalid="true" aria-describedby="title-error"><span id="title-error">Required</span><button data-hemx-on="click">Create</button></form><form action="/search" method="get"><input name="q"></form><li data-hemx-slot="row" data-hemx-key="7"></li></main>"#,
         )
         .unwrap();
 
@@ -4305,6 +2356,8 @@ mod hemx {{
     impl BuildFingerprint {{ pub const fn from_parts(_: &[u32]) -> Self {{ Self }} }}
     pub struct Effect;
     #[derive(Clone, Copy)] pub struct ResourceId;
+    #[derive(Clone, Copy)] pub struct EventName(&'static str);
+    impl EventName {{ pub const fn new(name: &'static str) -> Self {{ Self(name) }} }}
     pub trait IntoEffect {{}}
     impl IntoEffect for Effect {{}}
     pub trait GeneratedTarget {{ fn __hemx_resource_id(self) -> ResourceId; }}
@@ -4315,8 +2368,6 @@ mod hemx {{
     impl<K, T> KeyedSlot<K, T> {{ pub const fn new(_: u32) -> Self {{ Self(::std::marker::PhantomData) }} pub const fn id(self) -> ResourceId {{ ResourceId }} pub fn append_html(self, _: K, _: impl ::std::convert::Into<SafeHtml>) -> Effect {{ Effect }} pub fn prepend_html(self, _: K, _: impl ::std::convert::Into<SafeHtml>) -> Effect {{ Effect }} pub fn replace_html(self, _: K, _: impl ::std::convert::Into<SafeHtml>) -> Effect {{ Effect }} pub fn remove(self, _: K) -> Effect {{ Effect }} pub fn move_before(self, _: K, _: K) -> Effect {{ Effect }} pub fn move_to_end(self, _: K) -> Effect {{ Effect }} }}
     #[derive(Clone, Copy)] pub struct Handle<T>(::std::marker::PhantomData<T>);
     impl<T> Handle<T> {{ pub const fn new(_: u32) -> Self {{ Self(::std::marker::PhantomData) }} }}
-    #[derive(Clone, Copy)] pub struct Atom<T>(::std::marker::PhantomData<T>);
-    impl<T> Atom<T> {{ pub const fn new(_: u32) -> Self {{ Self(::std::marker::PhantomData) }} }}
     #[derive(Clone, Copy)] pub struct Form<T>(::std::marker::PhantomData<T>);
     impl<T> Form<T> {{ pub const fn new(_: u32) -> Self {{ Self(::std::marker::PhantomData) }} }}
     #[derive(Clone, Copy)] pub struct ComponentRef(&'static str);
@@ -4337,10 +2388,21 @@ mod hemplate {{
 }}
 {generated}
 fn main() {{
-    let html = todo::lower_html(r#"<form data-hemx-handle="create"><input name="title"></form><li data-hemx-slot="row" h-key="7"></li>"#);
-    assert!(html.contains(r#"data-hid="#));
+    let html = todo::lower_html(r#"<main data-hemx-root><a href="/docs">Docs</a><form action="/todos" method="post" data-hemx-handle="create"><label for="title">Title</label><input id="title" name="title" aria-invalid="true" aria-describedby="title-error"><span id="title-error">Required</span><button data-hemx-on="click">Create</button></form><form action="/search" method="get"><input name="q"></form><li data-hemx-slot="row" h-key="7"></li></main>"#);
+    assert!(html.contains(r#"data-hemx-root"#));
+    assert!(html.contains(r#"data-hemx-action="#));
+    assert!(html.contains(r#"data-hemx-resource="#));
+    assert!(html.contains(r#"data-hemx-key="7""#));
+    assert!(html.contains(r#"data-hemx-on="click""#));
+    assert!(html.contains(r#"<a href="/docs">"#));
+    assert!(html.contains(r#"action="/todos" method="post""#));
+    assert!(html.contains(r#"action="/search" method="get""#));
+    assert!(html.contains(r#"aria-invalid="true""#));
+    assert!(html.contains(r#"aria-describedby="title-error""#));
+    assert!(html.contains(r#"id="title-error">Required"#));
     assert!(html.contains(r#"name="__h""#));
-    assert!(html.contains(r#"data-key="7""#));
+    assert!(!html.contains("data-hid"));
+    assert!(!html.contains("data-sid"));
     assert!(!html.contains("h-key"));
 }}
 "###,

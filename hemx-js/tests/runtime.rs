@@ -14,10 +14,10 @@ fn runtime_exposes_debug_api_before_startup_side_effects() {
         .find("if (document.readyState === \"loading\") document.addEventListener(\"DOMContentLoaded\", start)")
         .expect("runtime starts after declaration");
     assert!(api < start);
-    assert!(source.contains("try {\n        bootstrapState(root);"));
-    assert!(source.contains("emit(root, \"hemx:state-error\", String(error));"));
-    assert!(source.contains("try {\n        bindRoot(root);"));
-    assert!(source.contains("emit(root, \"hemx:bind-error\", String(error));"));
+    assert!(source.contains("roots().forEach(bindEnhancedRoot)"));
+    assert!(source.contains("bindAdapter(root, \"events\", () => bindRoot(root))"));
+    assert!(source.contains("bindAdapter(root, \"sse\", () => bindSse(root))"));
+    assert!(source.contains("emit(root, `hemx:${name}-error`, String(error))"));
 }
 
 #[test]
@@ -76,6 +76,20 @@ fn runtime_preserves_multipart_file_upload_fallback_shape() {
 }
 
 #[test]
+fn runtime_preserves_native_form_controls_and_validation() {
+    let source = hemx_js::RUNTIME_JS;
+
+    assert!(source.contains("if (form.reportValidity && !form.reportValidity()) return;"));
+    assert!(source.contains(
+        "return source && source !== form ? new FormData(form, source) : new FormData(form);"
+    ));
+    assert!(source.contains("event.submitter || node"));
+    assert!(source.contains("multipart/form-data"));
+    assert!(!source.contains("compositionstart"));
+    assert!(!source.contains("compositionend"));
+}
+
+#[test]
 fn runtime_uses_root_scoped_walks_not_dom_selector_apis() {
     let source = hemx_js::RUNTIME_JS;
 
@@ -98,16 +112,15 @@ fn runtime_targets_generated_resources_not_response_selectors() {
     assert!(source.contains("return generatedTarget(scope, ref.resource.id)"));
     assert!(source.contains("function firstElement(scope, predicate)"));
     assert!(source.contains("function generatedResource(el, id)"));
-    assert!(source.contains("return firstElement(scope, (el) => attrEquals(el, \"data-key\", key) && withinGeneratedResource(el, scope, id))"));
-    assert!(
-        source.contains("const nodes = fragmentNodes(op.payload, op.key, op.target.resource.id)")
-    );
-    assert!(source.contains("if (op.target.scope && op.target.scope.kind === \"key\" && op.payload.kind === \"html\") replacePayload(target, op.payload, op.target.scope.value, op.target.resource.id)"));
-    assert!(source.contains("function replacePayload(target, payload, key, resourceId)"));
+    assert!(source.contains("return firstElement(scope, (el) => attrEquals(el, \"data-hemx-key\", key) && withinGeneratedResource(el, scope, id))"));
+    assert!(source.contains("node.hasAttribute(ROOT) || node.hasAttribute(ISLAND)"));
+    assert!(source.contains("if (!applyOp(scope, op)) return"));
+    assert!(!source.contains("canApplyOp"));
+    assert!(source.contains("if (op.position === \"first\") target.prepend"));
+    assert!(source.contains("else if (op.position === \"last\") target.append"));
     assert!(source.contains("target.replaceWith(...nodes)"));
-    assert!(source.contains("firstElement.setAttribute(\"data-sid\", resourceId)"));
-    assert!(source.contains("const target = generatedTarget(scope, id)"));
-    assert!(source.contains("if (!target) return missing(scope, op.target)"));
+    assert!(source.contains("emit(scope, op.event, op.payload)"));
+    assert!(!source.contains("handleRuntimeEvent"));
     assert!(!source.contains("data-hemx-target"));
     assert!(!source.contains("data-hemx-select"));
 }
@@ -130,11 +143,10 @@ fn runtime_interval_dispatch_avoids_duplicate_timers() {
 }
 
 #[test]
-fn runtime_supports_tiny_delay_and_revealed_scheduling() {
+fn runtime_supports_revealed_scheduling() {
     let source = hemx_js::RUNTIME_JS;
 
-    assert!(source.contains("data-hemx-delay"));
-    assert!(source.contains("setTimeout(() => send(el, eventName, source), delay)"));
+    assert!(!source.contains("data-hemx-delay"));
     assert!(source.contains("const revealObservers = new WeakMap()"));
     assert!(source.contains("const revealed = new WeakSet()"));
     assert!(source.contains("data-hemx-revealed"));
@@ -146,13 +158,12 @@ fn runtime_supports_tiny_delay_and_revealed_scheduling() {
     assert!(source.contains("window.addEventListener(\"pageshow\", restoreRevealed)"));
     assert!(source.contains("revealed.delete(el)"));
     assert!(source.contains("record.addedNodes.forEach((node) =>"));
-    assert!(source.contains("descendantRoots(node).forEach(bindRoot)"));
+    assert!(source.contains("descendantRoots(node).forEach(bindEnhancedRoot)"));
     assert!(source.contains("const owner = rootOf(node.parentElement)"));
     assert!(source.contains("bindPolling(owner)"));
     assert!(source.contains("bindRevealed(owner)"));
-    assert!(source.contains(
-        "for (const op of batch.ops) applyOp(scope, op);\n    bindPolling(scope);\n    bindRevealed(scope);"
-    ));
+    assert!(source.contains("if (!applyOp(scope, op)) return;"));
+    assert!(source.contains("bindPolling(scope);\n    bindRevealed(scope);"));
 }
 
 #[test]
@@ -240,7 +251,7 @@ fn runtime_clicking_submitter_schedules_form_submit() {
     );
     assert!(!source.contains("document.getElementById(el.getAttribute(\"form\"))"));
     assert!(source.contains(
-        "const direct = closestInRoot(event.target, root, (el) => el.hasAttribute(HID))"
+        "const direct = closestInRoot(event.target, root, (el) => el.hasAttribute(ACTION))"
     ));
     assert!(source.contains("const submitter = closestInRoot(event.target, root, (el) =>"));
     assert!(source.contains("el.tagName === \"BUTTON\" && (!el.hasAttribute(\"type\") || el.getAttribute(\"type\") === \"submit\")"));
@@ -311,6 +322,7 @@ fn runtime_exposes_page_swap_hooks() {
     assert!(source.contains("x-hemx-fingerprint"));
     assert!(source.contains("hemx:missing-content-slot"));
     assert!(source.contains("else location.href = href"));
+    assert!(source.contains("if (!response.ok || !await applyResponse(response, root))"));
 }
 
 #[test]
@@ -319,6 +331,7 @@ fn runtime_popstate_failed_partials_reload_instead_of_stale_ui() {
 
     assert!(source.contains("if (mode === \"none\") location.reload();"));
     assert!(source.contains("if (root) navigateUrl(location.href, root, \"none\")"));
+    assert!(source.contains("catch (_) {\n      fallbackNavigation(href, mode);"));
 }
 
 #[test]
@@ -340,22 +353,18 @@ fn runtime_refuses_partial_updates_on_fingerprint_mismatch() {
 
     assert!(source.contains("function compatibleFingerprint(response, root)"));
     assert!(source.contains("const received = response.headers.get(\"x-hemx-fingerprint\")"));
-    assert!(source.contains("const expected = root && root.getAttribute(FINGERPRINT)"));
+    assert!(source.contains("const expected = root && root.getAttribute(BUILD)"));
     assert!(source.contains("if (!compatibleFingerprint(response, root))"));
     assert!(source.contains("location.reload()"));
     assert!(source.contains("if (expected && String(batch.fingerprint) !== expected)"));
 }
 
 #[test]
-fn runtime_malformed_bootstrap_state_reports_and_continues() {
+fn runtime_has_no_mirrored_client_application_store() {
     let source = hemx_js::RUNTIME_JS;
 
-    assert!(source.contains("function bootstrapState(root)"));
-    assert!(source.contains("try {\n      const store = atomStore(root);"));
-    assert!(source.contains("atomStores.delete(root)"));
-    assert!(source.contains("emit(root, \"hemx:state-error\", String(error))"));
-    assert!(source.contains("bindRoot(root)"));
-    assert!(source.contains("bindSse(root)"));
+    assert!(!source.contains("atomStore"));
+    assert!(!source.contains("bootstrapState"));
 }
 
 #[test]
@@ -393,6 +402,34 @@ fn runtime_applies_binary_websocket_effect_batches_inside_roots() {
 }
 
 #[test]
+fn runtime_binds_adapters_once_and_cleans_removed_fragments() {
+    let source = hemx_js::RUNTIME_JS;
+
+    assert!(source.contains("const boundRoots = new WeakSet()"));
+    assert!(source.contains("if (boundRoots.has(root)) return;"));
+    assert!(source.contains("if (rootOf(event.target) !== root) return;"));
+    assert!(source.contains("if (rootOf(el) !== root) return;"));
+    assert!(source.contains("descendantRoots(node).forEach(bindEnhancedRoot)"));
+    assert!(source.contains("function bindAdapter(root, name, bind)"));
+    assert!(source.contains("cleanupRemovedFragment(node)"));
+    assert!(source.contains("source.close()"));
+    assert!(source.contains("socket.close()"));
+    assert!(source.contains("observer.disconnect()"));
+    assert!(source.contains("stopDescendantPolling(node)"));
+    assert!(source.contains("boundRoots.delete(root)"));
+}
+
+#[test]
+fn runtime_preserves_explicit_island_subtrees() {
+    let source = hemx_js::RUNTIME_JS;
+
+    assert!(source.contains("const ISLAND = \"data-hemx-island\""));
+    assert!(source.contains("node.hasAttribute(ROOT) || node.hasAttribute(ISLAND)"));
+    assert!(source.contains("preserveIslands(target, nodes)"));
+    assert!(source.contains("island.replaceWith(preserved)"));
+}
+
+#[test]
 fn runtime_page_swaps_lowered_slot_ids() {
     let source = hemx_js::RUNTIME_JS;
 
@@ -417,14 +454,12 @@ fn runtime_keeps_form_field_targets_separate_from_error_targets() {
 }
 
 #[test]
-fn runtime_preflights_batches_before_applying_ops() {
+fn runtime_applies_batches_in_order_and_stops_on_failure() {
     let source = hemx_js::RUNTIME_JS;
 
-    assert!(source.contains(
-        "const missingTarget = batch.ops.map((op) => canApplyOp(scope, op)).find(Boolean)"
-    ));
-    assert!(source.contains("function canApplyOp(scope, op)"));
-    assert!(source.contains("for (const op of batch.ops) applyOp(scope, op)"));
+    assert!(source.contains("for (const op of batch.ops)"));
+    assert!(source.contains("if (!applyOp(scope, op)) return;"));
+    assert!(!source.contains("function canApplyOp(scope, op)"));
 }
 
 #[test]
@@ -439,13 +474,31 @@ fn runtime_ships_typescript_definitions() {
 }
 
 #[test]
-fn runtime_clears_error_for_elements_on_form_reset() {
+fn runtime_dispatches_payload_without_application_policy() {
     let source = hemx_js::RUNTIME_JS;
 
-    assert!(source.contains(r#"if (name === "hemx:form-reset")"#));
-    assert!(source.contains("form.reset();"));
-    assert!(source.contains(r#"if (el.hasAttribute("data-hemx-error-for"))"#));
-    assert!(source.contains("forEachElement(form, (el) => {"));
-    assert!(source.contains("el.setCustomValidity(\"\")"));
-    assert!(source.contains("el.textContent = \"\""));
+    assert!(source.contains("emit(scope, op.event, op.payload)"));
+    assert!(!source.contains("hemx:form-reset"));
+    assert!(!source.contains("handleRuntimeEvent"));
+}
+
+#[test]
+fn runtime_executes_every_closed_effect_with_owned_targets() {
+    let source = hemx_js::RUNTIME_JS;
+
+    for kind in [
+        "patch", "insert", "remove", "move", "focus", "scroll", "visit", "dispatch",
+    ] {
+        assert!(
+            source.contains(&format!("op.kind === \"{kind}\"")),
+            "missing {kind} executor"
+        );
+    }
+    assert!(source.contains("target.replaceWith(...nodes)"));
+    assert!(source.contains("target.parentNode.prepend(target)"));
+    assert!(source.contains("target.parentNode.append(target)"));
+    assert!(source.contains("target.focus({ preventScroll: op.preventScroll })"));
+    assert!(source.contains("target.scrollIntoView({ block: op.block, behavior: op.behavior })"));
+    assert!(source.contains("navigateUrl(op.url, scope, op.history).catch"));
+    assert!(source.contains("emit(scope, op.event, op.payload)"));
 }

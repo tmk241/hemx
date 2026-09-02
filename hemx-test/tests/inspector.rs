@@ -1,6 +1,6 @@
 use hemx_core::{
-    Atom, BuildFingerprint, Effect, EffectBatch, Form, GeneratedTarget, KeyedSlot, NavigateMode,
-    Payload, ResourceId, ResourceKind, ResourceRef, ScopeKey, Slot,
+    BuildFingerprint, Effect, EffectBatch, Form, GeneratedTarget, HistoryMode, InsertPosition,
+    KeyedSlot, PatchMode, ResourceId, ResourceKind, ResourceRef, SafeHtml, ScopeKey, Slot,
 };
 
 #[derive(Clone, Copy)]
@@ -29,15 +29,14 @@ fn panic_text<T>(result: std::thread::Result<T>) -> String {
 #[test]
 fn inspects_tuple_effects() {
     let count = Slot::<u32>::new(1);
-    let user = Atom::<String>::new(2);
 
-    let inspected = hemx_test::run(|value| (count.text(value), user.set("alice")), 42);
+    let inspected = hemx_test::run(|value| count.text(value), 42);
 
     assert!(inspected.has_slot(count));
-    assert!(inspected.has_atom(user));
-    assert!(inspected.contains(&Effect::Put {
+    assert!(inspected.contains(&Effect::Patch {
         target: ResourceRef::unscoped(count.id()),
-        payload: Payload::text(42),
+        mode: PatchMode::Morph,
+        html: SafeHtml::trusted("42"),
     }));
 }
 
@@ -45,13 +44,15 @@ fn inspects_tuple_effects() {
 fn text_update_condition_is_bound_to_the_expected_target() {
     let expected_target = TestTarget(ResourceKind::Slot, 42);
     let inspected = hemx_test::inspect(vec![
-        Effect::Put {
+        Effect::Patch {
             target: ResourceRef::unscoped(ResourceId::new(ResourceKind::Slot, 42)),
-            payload: Payload::Text(String::from("wrong payload")),
+            mode: PatchMode::Morph,
+            html: SafeHtml::trusted("wrong payload"),
         },
-        Effect::Put {
+        Effect::Patch {
             target: ResourceRef::unscoped(ResourceId::new(ResourceKind::Slot, 7)),
-            payload: Payload::Text(String::from("expected fragment")),
+            mode: PatchMode::Morph,
+            html: SafeHtml::trusted("expected fragment"),
         },
     ]);
 
@@ -77,9 +78,10 @@ fn text_update_condition_is_bound_to_the_expected_target() {
 #[test]
 fn html_update_assertion_reports_expectation_and_actual_effects() {
     let target = TestTarget(ResourceKind::Slot, 42);
-    let inspected = hemx_test::inspect(Effect::Put {
+    let inspected = hemx_test::inspect(Effect::Patch {
         target: ResourceRef::unscoped(ResourceId::new(ResourceKind::Slot, 7)),
-        payload: Payload::Html(String::from("<p>actual</p>")),
+        mode: PatchMode::Morph,
+        html: SafeHtml::trusted("<p>actual</p>"),
     });
 
     let panic = std::panic::catch_unwind(|| {
@@ -113,59 +115,59 @@ fn inspector_predicates_bind_operation_target_scope_kind_and_payload() {
     let resource = ResourceId::new(ResourceKind::Slot, 42);
     let keyed_ref = ResourceRef::scoped(resource, ScopeKey::KeyValue("row-1".into()));
     let form = Form::<()>::new(11);
-    let expected_emit = Effect::Emit {
-        name: "saved".into(),
-        payload: "card 42 saved".into(),
+    let expected_emit = Effect::Dispatch {
+        event: "saved".into(),
+        payload: b"card 42 saved".to_vec(),
     };
     let inspected = hemx_test::inspect(vec![
-        Effect::Put {
+        Effect::Patch {
             target: ResourceRef::unscoped(other.__hemx_resource_id()),
-            payload: Payload::Text("decoy needle".into()),
+            mode: PatchMode::Morph,
+            html: SafeHtml::trusted("decoy needle"),
         },
-        Effect::Put {
+        Effect::Patch {
             target: ResourceRef::unscoped(resource),
-            payload: Payload::Text("expected text".into()),
+            mode: PatchMode::Morph,
+            html: SafeHtml::trusted("expected text"),
         },
-        Effect::Put {
+        Effect::Patch {
             target: keyed_ref.clone(),
-            payload: Payload::Html("<li data-key=\"row-1\">replacement</li>".into()),
+            mode: PatchMode::Replace,
+            html: SafeHtml::trusted("<li data-hemx-key=\"row-1\">replacement</li>"),
         },
         Effect::Insert {
             target: ResourceRef::unscoped(resource),
-            key: "row-2".into(),
-            payload: Payload::Html("<li>inserted</li>".into()),
+            position: InsertPosition::After(ResourceRef::scoped(
+                resource,
+                ScopeKey::KeyValue("row-1".into()),
+            )),
+            html: SafeHtml::trusted("<li data-hemx-key=\"row-2\">inserted</li>"),
         },
-        Effect::Prepend {
+        Effect::Insert {
             target: ResourceRef::unscoped(resource),
-            key: "row-0".into(),
-            payload: Payload::Html("<li>prepended</li>".into()),
+            position: InsertPosition::First,
+            html: SafeHtml::trusted("<li data-hemx-key=\"row-0\">prepended</li>"),
         },
         Effect::Remove {
-            target: ResourceRef::unscoped(resource),
-            key: Some("row-old".into()),
+            target: ResourceRef::scoped(resource, ScopeKey::KeyValue("row-old".into())),
         },
         Effect::Focus {
             target: ResourceRef::unscoped(form.id()),
+            prevent_scroll: false,
         },
-        Effect::Navigate {
+        Effect::Visit {
             url: "/cards/42".into(),
-            mode: NavigateMode::Push,
-            scroll: hemx_core::ScrollBehavior::Preserve,
-            title: None,
+            history: HistoryMode::Push,
         },
         expected_emit.clone(),
-        Effect::Emit {
-            name: "hemx:form-reset".into(),
-            payload: form.id().id.to_string(),
-        },
     ]);
 
     assert!(!inspected.is_empty());
-    assert_eq!(inspected.op_count(), 10);
+    assert_eq!(inspected.op_count(), 9);
     assert!(inspected.contains(&expected_emit));
-    assert!(!inspected.contains(&Effect::Emit {
-        name: "saved".into(),
-        payload: "wrong".into(),
+    assert!(!inspected.contains(&Effect::Dispatch {
+        event: "saved".into(),
+        payload: b"wrong".to_vec(),
     }));
     assert!(inspected.has_resource(resource));
     assert!(inspected.has_resource(other.__hemx_resource_id()));
@@ -197,15 +199,15 @@ fn inspector_predicates_bind_operation_target_scope_kind_and_payload() {
     assert!(!inspected.payload_excludes_key("row-1"));
     assert_eq!(
         inspected.target_html_containing(expected, "replacement"),
-        Some("<li data-key=\"row-1\">replacement</li>")
+        Some("<li data-hemx-key=\"row-1\">replacement</li>")
     );
     assert_eq!(
         inspected.target_html_containing(expected, "inserted"),
-        Some("<li>inserted</li>")
+        Some("<li data-hemx-key=\"row-2\">inserted</li>")
     );
     assert_eq!(
         inspected.target_html_containing(expected, "prepended"),
-        Some("<li>prepended</li>")
+        Some("<li data-hemx-key=\"row-0\">prepended</li>")
     );
     assert_eq!(inspected.target_html_containing(expected, "missing"), None);
     assert!(inspected.emits("saved", "card 42 saved"));
@@ -222,11 +224,8 @@ fn inspector_predicates_bind_operation_target_scope_kind_and_payload() {
     assert!(!inspected.has_slot(Slot::<()>::new(99)));
     assert!(inspected.has_keyed_slot(KeyedSlot::<String, ()>::new(42)));
     assert!(!inspected.has_keyed_slot(KeyedSlot::<String, ()>::new(99)));
-    assert!(!inspected.has_atom(Atom::<()>::new(42)));
     assert!(inspected.has_form(form));
     assert!(!inspected.has_form(Form::<()>::new(12)));
-    assert!(inspected.resets_form(form));
-    assert!(!inspected.resets_form(Form::<()>::new(12)));
 
     let empty = hemx_test::inspect(Vec::<Effect>::new());
     assert!(empty.is_empty());
@@ -238,9 +237,9 @@ fn inspect_wire_reports_the_decode_failure_and_accepts_canonical_batches() {
     let batch = EffectBatch {
         abi_version: hemx_core::EFFECT_BATCH_ABI_VERSION,
         fingerprint: BuildFingerprint(9),
-        ops: vec![Effect::Emit {
-            name: "saved".into(),
-            payload: "ok".into(),
+        ops: vec![Effect::Dispatch {
+            event: "saved".into(),
+            payload: b"ok".to_vec(),
         }],
     };
     assert!(hemx_test::inspect_wire(&batch.to_wire()).emits("saved", "ok"));

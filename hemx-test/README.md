@@ -51,7 +51,7 @@ Complete server-rendered pages can be inspected directly:
 
 ```rust
 let page = hemx_test::inspect_html_document(
-    "<!doctype html><html><body><main id=app data-sid=7>Ready</main></body></html>",
+    "<!doctype html><html><body><main id=app data-hemx-resource=7>Ready</main></body></html>",
 );
 page.assert_text("main#app", "Ready");
 # use hemx_core::{GeneratedTarget, ResourceId, Slot};

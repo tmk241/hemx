@@ -1,8 +1,8 @@
 //! Repeatable wire-encoding baseline: `cargo bench -p hemx-core --bench wire`.
 
 use hemx_core::{
-    BuildFingerprint, Effect, EffectBatch, Payload, ResourceId, ResourceKind, ResourceRef,
-    EFFECT_BATCH_ABI_VERSION,
+    BuildFingerprint, Effect, EffectBatch, PatchMode, ResourceId, ResourceKind, ResourceRef,
+    SafeHtml, EFFECT_BATCH_ABI_VERSION,
 };
 use std::hint::black_box;
 use std::time::Instant;
@@ -13,9 +13,10 @@ const ROUNDS: usize = 7;
 fn representative_batch() -> EffectBatch {
     let target = ResourceRef::unscoped(ResourceId::new(ResourceKind::Slot, 42));
     let ops = (0..50)
-        .map(|index| Effect::Put {
+        .map(|index| Effect::Patch {
             target: target.clone(),
-            payload: Payload::Text(format!("item-{index}-{}", "x".repeat(64))),
+            mode: PatchMode::Morph,
+            html: SafeHtml::trusted(format!("item-{index}-{}", "x".repeat(64))),
         })
         .collect();
     EffectBatch {

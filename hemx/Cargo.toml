@@ -21,7 +21,7 @@ harness = false
 default = []
 
 [dependencies]
-hemx-core = { version = "0.3.0", path = "../hemx-core" }
-hemx-derive = { version = "0.3.0", path = "../hemx-derive" }
+hemx-core = { version = "0.4.0", path = "../hemx-core" }
+hemx-derive = { version = "0.4.0", path = "../hemx-derive" }
 
-hemplate = { version = "0.2.0", default-features = false }
+hemplate = { version = "0.3.0", default-features = false }

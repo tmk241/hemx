@@ -231,7 +231,12 @@ fn form_model_type(ty: &Type) -> Option<Type> {
     let segments = path.path.segments.iter().collect::<Vec<_>>();
     let form = match segments.as_slice() {
         [form] if form.ident == "Form" => form,
-        [hemx, .., form] if hemx.ident == "hemx" && form.ident == "Form" => form,
+        [namespace, .., form]
+            if (namespace.ident == "hemx" || namespace.ident == "hemx_axum")
+                && form.ident == "Form" =>
+        {
+            form
+        }
         _ => return None,
     };
     let PathArguments::AngleBracketed(args) = &form.arguments else {
@@ -927,6 +932,25 @@ mod tests {
     };
     use quote::{quote, ToTokens};
     use syn::{parse_quote, ItemFn, Type};
+
+    #[test]
+    fn handler_form_model_accepts_documented_qualified_spellings() {
+        let local: ItemFn = parse_quote!(
+            fn save(form: Form<Project>) {}
+        );
+        let adapter: ItemFn = parse_quote!(
+            fn save(form: hemx_axum::Form<Project>) {}
+        );
+        let facade: ItemFn = parse_quote!(
+            fn save(form: hemx::Form<Project>) {}
+        );
+
+        for item in [&local, &adapter, &facade] {
+            let model = handler_form_model_type(item).expect("typed form model");
+            assert_eq!(model.to_token_stream().to_string(), "Project");
+            assert!(has_form_param(item));
+        }
+    }
 
     #[test]
     fn generated_file_and_form_helpers_preserve_exact_contracts() {
