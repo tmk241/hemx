@@ -142,6 +142,9 @@ async fn interaction_boundary_extracts_multipart_fields_and_files() {
         "Content-Disposition: form-data; name=\"__h\"\r\n\r\n",
         "7\r\n",
         "--hemx-boundary\r\n",
+        "Content-Disposition: form-data; name=\"__b\"\r\n\r\n",
+        "4\r\n",
+        "--hemx-boundary\r\n",
         "Content-Disposition: form-data; name=\"title\"\r\n\r\n",
         "report\r\n",
         "--hemx-boundary\r\n",
@@ -517,10 +520,10 @@ fn interaction_form_preserves_hidden_csrf_fields_for_extractors() {
 
 #[test]
 fn interaction_request_dispatches_with_concise_handlers_helper() {
-    let request = InteractionRequest::from(InteractionForm::for_handle(
-        Handle::<()>::new(7),
-        Vec::new(),
-    ));
+    let request = InteractionRequest::from(
+        InteractionForm::for_handle(Handle::<()>::new(7), Vec::new())
+            .with_build(BuildFingerprint(4)),
+    );
     let response = request
         .dispatch(
             interactions(BuildFingerprint(4))
@@ -549,10 +552,10 @@ fn state_interactions_starts_stateful_wiring_without_nested_closures() {
             .into_registry()
     };
 
-    let ping_response = InteractionRequest::from(InteractionForm::for_handle(
-        Handle::<()>::new(7),
-        Vec::new(),
-    ))
+    let ping_response = InteractionRequest::from(
+        InteractionForm::for_handle(Handle::<()>::new(7), Vec::new())
+            .with_build(BuildFingerprint(4)),
+    )
     .dispatch(registry())
     .unwrap();
     assert_eq!(
@@ -560,10 +563,13 @@ fn state_interactions_starts_stateful_wiring_without_nested_closures() {
         vec![Slot::<String>::new(3).text("project: ping")]
     );
 
-    let open_response = InteractionRequest::from(InteractionForm::for_handle(
-        Handle::<()>::new(8),
-        vec![("project_id".to_owned(), "42".to_owned())],
-    ))
+    let open_response = InteractionRequest::from(
+        InteractionForm::for_handle(
+            Handle::<()>::new(8),
+            vec![("project_id".to_owned(), "42".to_owned())],
+        )
+        .with_build(BuildFingerprint(4)),
+    )
     .dispatch(registry())
     .unwrap();
     assert_eq!(
@@ -645,10 +651,13 @@ async fn interaction_form_rejections_return_stable_status_and_diagnostic() {
 
 #[test]
 fn interaction_request_dispatches_typed_form_inputs() {
-    let request = InteractionRequest::from(InteractionForm::for_handle(
-        Handle::<()>::new(8),
-        vec![("project_id".to_owned(), "42".to_owned())],
-    ));
+    let request = InteractionRequest::from(
+        InteractionForm::for_handle(
+            Handle::<()>::new(8),
+            vec![("project_id".to_owned(), "42".to_owned())],
+        )
+        .with_build(BuildFingerprint(4)),
+    );
     let response = request
         .dispatch(
             interactions(BuildFingerprint(4))
@@ -664,10 +673,13 @@ fn interaction_request_dispatches_typed_form_inputs() {
 
 #[test]
 fn interaction_request_rejects_invalid_typed_form_inputs() {
-    let request = InteractionRequest::from(InteractionForm::for_handle(
-        Handle::<()>::new(8),
-        vec![("project_id".to_owned(), "nope".to_owned())],
-    ));
+    let request = InteractionRequest::from(
+        InteractionForm::for_handle(
+            Handle::<()>::new(8),
+            vec![("project_id".to_owned(), "nope".to_owned())],
+        )
+        .with_build(BuildFingerprint(4)),
+    );
     let rejection = request
         .dispatch(
             interactions(BuildFingerprint(4))
@@ -689,10 +701,13 @@ fn interaction_request_dispatches_typed_state_handlers() {
         Slot::<String>::new(3).text(input.project_id.0 * multiplier)
     }
 
-    let request = InteractionRequest::from(InteractionForm::for_handle(
-        Handle::<()>::new(9),
-        vec![("project_id".to_owned(), "21".to_owned())],
-    ));
+    let request = InteractionRequest::from(
+        InteractionForm::for_handle(
+            Handle::<()>::new(9),
+            vec![("project_id".to_owned(), "21".to_owned())],
+        )
+        .with_build(BuildFingerprint(4)),
+    );
     let response = request
         .dispatch(
             interactions(BuildFingerprint(4))
@@ -739,10 +754,13 @@ async fn interaction_request_dispatches_async_typed_state_extractors() {
         Slot::<String>::new(3).text(input.project_id.0 * multiplier)
     }
 
-    let request = InteractionRequest::from(InteractionForm::for_handle(
-        Handle::<()>::new(10),
-        vec![("project_id".to_owned(), "21".to_owned())],
-    ));
+    let request = InteractionRequest::from(
+        InteractionForm::for_handle(
+            Handle::<()>::new(10),
+            vec![("project_id".to_owned(), "21".to_owned())],
+        )
+        .with_build(BuildFingerprint(4)),
+    );
     let response = request
         .dispatch_async(
             interactions(BuildFingerprint(4))
@@ -765,10 +783,13 @@ async fn interaction_request_reports_async_result_handler_errors() {
         Err::<(), _>(HandlerBoom)
     }
 
-    let request = InteractionRequest::from(InteractionForm::for_handle(
-        Handle::<()>::new(11),
-        vec![("project_id".to_owned(), "21".to_owned())],
-    ));
+    let request = InteractionRequest::from(
+        InteractionForm::for_handle(
+            Handle::<()>::new(11),
+            vec![("project_id".to_owned(), "21".to_owned())],
+        )
+        .with_build(BuildFingerprint(4)),
+    );
     let error = request
         .dispatch_async(
             interactions(BuildFingerprint(4))
@@ -797,10 +818,13 @@ async fn interaction_request_maps_async_result_errors_to_effects() {
         Err::<(), _>(UiFailure)
     }
 
-    let request = InteractionRequest::from(InteractionForm::for_handle(
-        Handle::<()>::new(12),
-        vec![("project_id".to_owned(), "21".to_owned())],
-    ));
+    let request = InteractionRequest::from(
+        InteractionForm::for_handle(
+            Handle::<()>::new(12),
+            vec![("project_id".to_owned(), "21".to_owned())],
+        )
+        .with_build(BuildFingerprint(4)),
+    );
     let response = request
         .dispatch_async(
             interactions(BuildFingerprint(4))
@@ -826,10 +850,13 @@ fn interaction_request_maps_sync_result_errors_to_effects() {
         Err::<(), _>(UiFailure)
     }
 
-    let request = InteractionRequest::from(InteractionForm::for_handle(
-        Handle::<()>::new(13),
-        vec![("project_id".to_owned(), "21".to_owned())],
-    ));
+    let request = InteractionRequest::from(
+        InteractionForm::for_handle(
+            Handle::<()>::new(13),
+            vec![("project_id".to_owned(), "21".to_owned())],
+        )
+        .with_build(BuildFingerprint(4)),
+    );
     let response = request
         .dispatch(
             interactions(BuildFingerprint(4))
@@ -849,10 +876,10 @@ fn interaction_request_maps_sync_result_errors_to_effects() {
 fn interactions_dispatch_by_checked_handle() {
     let title = Slot::<String>::new(7);
     let create = Handle::<()>::new(42);
-    let request = InteractionRequest::from(InteractionForm::for_handle(
-        create,
-        [("title".into(), "Hello".into())],
-    ));
+    let request = InteractionRequest::from(
+        InteractionForm::for_handle(create, [("title".into(), "Hello".into())])
+            .with_build(BuildFingerprint(123)),
+    );
 
     let response = request
         .dispatch(interactions(BuildFingerprint(123)).on(create, move |form| {
@@ -878,10 +905,12 @@ async fn registry_contains_registered_sync_and_async_handles_and_async_falls_bac
     assert!(registry.contains(asynchronous.id().id));
     assert!(!registry.contains(99));
 
-    let sync_response = InteractionRequest::from(InteractionForm::for_handle(sync, []))
-        .dispatch_async(registry)
-        .await
-        .unwrap();
+    let sync_response = InteractionRequest::from(
+        InteractionForm::for_handle(sync, []).with_build(BuildFingerprint(55)),
+    )
+    .dispatch_async(registry)
+    .await
+    .unwrap();
     assert_eq!(sync_response.batch.fingerprint, BuildFingerprint(55));
     assert_eq!(
         sync_response.batch.ops,
@@ -963,13 +992,16 @@ async fn state_result_registration_paths_preserve_state_form_and_failures() {
         assert!(registry.contains(handle.id().id));
     }
     assert!(registry
-        .dispatch(InteractionForm::for_handle(sync, []))
+        .dispatch(InteractionForm::for_handle(sync, []).with_build(BuildFingerprint(88)))
         .is_ok());
     let invalid_form = registry
-        .dispatch(InteractionForm::for_handle(
-            typed,
-            [(String::from("project_id"), String::from("invalid"))],
-        ))
+        .dispatch(
+            InteractionForm::for_handle(
+                typed,
+                [(String::from("project_id"), String::from("invalid"))],
+            )
+            .with_build(BuildFingerprint(88)),
+        )
         .unwrap_err();
     assert_eq!(
         invalid_form,
@@ -979,55 +1011,71 @@ async fn state_result_registration_paths_preserve_state_form_and_failures() {
         }
     );
     let error = registry
-        .dispatch(InteractionForm::for_handle(
-            typed,
-            [(String::from("project_id"), String::from("7"))],
-        ))
+        .dispatch(
+            InteractionForm::for_handle(typed, [(String::from("project_id"), String::from("7"))])
+                .with_build(BuildFingerprint(88)),
+        )
         .unwrap_err();
     assert_eq!(
         error,
         DispatchRejection::HandlerError(HandlerFailure::internal("database unavailable"))
     );
     assert!(registry
-        .dispatch_async(InteractionForm::for_handle(asynchronous, []))
+        .dispatch_async(
+            InteractionForm::for_handle(asynchronous, []).with_build(BuildFingerprint(88))
+        )
         .await
         .is_ok());
     let invalid_plain = registry
-        .dispatch(InteractionForm::for_handle(
-            typed_plain,
-            [(String::from("project_id"), String::from("invalid"))],
-        ))
+        .dispatch(
+            InteractionForm::for_handle(
+                typed_plain,
+                [(String::from("project_id"), String::from("invalid"))],
+            )
+            .with_build(BuildFingerprint(88)),
+        )
         .unwrap_err();
     assert!(matches!(
         invalid_plain,
         DispatchRejection::InvalidForm { .. }
     ));
     let invalid_state_plain = registry
-        .dispatch(InteractionForm::for_handle(
-            typed_state_plain,
-            [(String::from("project_id"), String::from("invalid"))],
-        ))
+        .dispatch(
+            InteractionForm::for_handle(
+                typed_state_plain,
+                [(String::from("project_id"), String::from("invalid"))],
+            )
+            .with_build(BuildFingerprint(88)),
+        )
         .unwrap_err();
     assert!(matches!(
         invalid_state_plain,
         DispatchRejection::InvalidForm { .. }
     ));
     assert!(registry
-        .dispatch_async(InteractionForm::for_handle(
-            typed_async_plain,
-            [(String::from("project_id"), String::from("8"))],
-        ))
+        .dispatch_async(
+            InteractionForm::for_handle(
+                typed_async_plain,
+                [(String::from("project_id"), String::from("8"))],
+            )
+            .with_build(BuildFingerprint(88))
+        )
         .await
         .is_ok());
     assert!(registry
-        .dispatch_async(InteractionForm::for_handle(state_async_plain, []))
+        .dispatch_async(
+            InteractionForm::for_handle(state_async_plain, []).with_build(BuildFingerprint(88))
+        )
         .await
         .is_ok());
     let response = registry
-        .dispatch_async(InteractionForm::for_handle(
-            typed_async,
-            [(String::from("project_id"), String::from("9"))],
-        ))
+        .dispatch_async(
+            InteractionForm::for_handle(
+                typed_async,
+                [(String::from("project_id"), String::from("9"))],
+            )
+            .with_build(BuildFingerprint(88)),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -1038,7 +1086,8 @@ async fn state_result_registration_paths_preserve_state_form_and_failures() {
 
 #[test]
 fn interactions_reject_unknown_handle_ids() {
-    let request = InteractionRequest::from(InteractionForm::new(9, []));
+    let request =
+        InteractionRequest::from(InteractionForm::new(9, []).with_build(BuildFingerprint(123)));
 
     assert_eq!(
         request

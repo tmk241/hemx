@@ -1,23 +1,20 @@
-# AGENTS.md
+# Working on Hemx
 
-## Overview
+## Where things belong
 
-Hemx is a Rust workspace for checked hypermedia applications. `README.md` is the
-user entry point; public APIs and tests establish supported behavior. Keep these
-sources consistent.
+- `hemx-core`: effects, typed resources and wire encoding.
+- `hemx-build` / `hemx-derive`: template inspection, generated resources and macros.
+- `hemx-js`: browser runtime; `hemx-axum`: HTTP and SSE integration.
+- `hemx`: application facade; `hemx-test`: public testing helpers.
 
-## Workspace layout
+Keep application state, routing, authentication, persistence and styling outside
+core. Use generated resource types rather than copied IDs or selectors. Effects
+must stay within their owning root and reject incompatible builds. Custom
+browser widgets belong in explicit islands.
 
-The main application path uses `hemx`, `hemx-build`, and `hemx-axum` on top of
-`hemx-core` and `hemx-derive`. Browser runtime concerns are isolated in
-`hemx-js`.
+## Checks
 
-Keep behavior in the package that owns it. Core effect and protocol types belong
-in `hemx-core`; framework-specific HTTP behavior belongs in `hemx-axum`.
-
-## Build and test
-
-Run the narrowest relevant test while editing. Before completing a change, run:
+Add a focused regression test for changed behavior. Before finishing, run:
 
 ```console
 cargo fmt --all -- --check
@@ -27,24 +24,8 @@ cargo deny check licenses sources
 cargo check -p hemx-server-wasm-test --target wasm32-unknown-unknown
 ```
 
-Changes to publishable packages require an archive-based `cargo package` check.
+Verify changed publishable packages with `cargo package`, including its archive
+build. Update the relevant README and Rustdoc when APIs or compatibility change.
 
-## Code guidelines
-
-- Keep generated APIs typed; avoid stringly typed target and event construction.
-- Preserve root-scoped effect application and fail closed on incompatible builds.
-- Keep routing, persistence, authentication, styling, and domain state outside core.
-- Put custom browser behavior behind explicit leaf-island boundaries.
-- Add or update a focused test for behavior changes and regressions.
-- Keep diagnostics actionable and update public docs when contracts change.
-
-## Repository hygiene
-
-Do not add machine-specific paths, private URLs, credentials, editor-local state,
-or generated build output. Do not commit package archives, coverage reports,
-benchmark output, `target/`, or temporary planning files.
-
-## Licensing
-
-New dependencies must pass `cargo deny check licenses sources`. Preserve license
-and attribution files in source and package archives.
+Keep credentials, machine-local files, temporary plans and build/test output out
+of Git. Preserve license and attribution files in both sources and packages.

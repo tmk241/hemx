@@ -23,7 +23,19 @@ pub(super) fn reject_selector_target_attrs(
 pub(super) fn reject_unknown_hemx_attrs(path: &Path, attrs: &[SurfaceAttribute]) -> io::Result<()> {
     for attr in attrs {
         let name = attr.name.as_str();
-        if name.starts_with("data-hemx-") && !known_hemx_attr(name) {
+        if name == "data-hemx-ws" {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{}: `data-hemx-ws` was removed; Hemx streams server updates with `data-hemx-sse`. An application that needs a WebSocket owns it and passes canonical batches to `window.hemx.applyBatch`",
+                    path.display()
+                ),
+            ));
+        }
+        if name.starts_with("data-hemx-")
+            && !known_hemx_attr(name)
+            && !name.starts_with(crate::artifact::HANDLE_PARAM_PREFIX)
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -41,9 +53,9 @@ pub(super) fn known_hemx_attr(name: &str) -> bool {
         name,
         "data-hemx-root"
             | "data-hemx-sse"
-            | "data-hemx-ws"
             | "data-hemx-handle"
             | "data-hemx-slot"
+            | "data-hemx-collection"
             | "data-hemx-form"
             | "data-hemx-key"
             | "data-hemx-on"
@@ -117,14 +129,6 @@ pub(super) fn reject_invalid_hemx_attr_values(
                     "expected a non-empty same-origin SSE URL",
                 ));
             }
-            "data-hemx-ws" if value.trim().is_empty() => {
-                return Err(invalid_hemx_value(
-                    path,
-                    &attr.name,
-                    value,
-                    "expected a non-empty same-origin WebSocket URL",
-                ));
-            }
             "data-hemx-revealed-ahead"
                 if !value
                     .trim()
@@ -161,6 +165,49 @@ pub(super) fn reject_invalid_hemx_attr_placement(
     tag: &str,
     attrs: &[SurfaceAttribute],
 ) -> io::Result<()> {
+    // These declarations all lower to the single data-hemx-resource marker.
+    // Handles lower to data-hemx-action, so action + form remains valid.
+    for (first, second) in [
+        ("data-hemx-slot", "data-hemx-collection"),
+        ("data-hemx-slot", "data-hemx-form"),
+        ("data-hemx-collection", "data-hemx-form"),
+    ] {
+        if has_attr(attrs, first) && has_attr(attrs, second) {
+            return Err(invalid_hemx_placement(
+                path,
+                second,
+                &format!(
+                    "an element cannot declare both `{first}` and `{second}`; both lower to the single `data-hemx-resource` marker; use separate elements"
+                ),
+            ));
+        }
+    }
+
+    if has_attr(attrs, "data-hemx-collection")
+        && matches!(
+            tag,
+            "area"
+                | "base"
+                | "br"
+                | "col"
+                | "embed"
+                | "hr"
+                | "img"
+                | "input"
+                | "link"
+                | "meta"
+                | "param"
+                | "source"
+                | "track"
+                | "wbr"
+        )
+    {
+        return Err(invalid_hemx_placement(
+            path,
+            "data-hemx-collection",
+            "expected a non-void element that can contain rows",
+        ));
+    }
     if has_attr(attrs, "data-hemx-nav")
         && (tag != "a"
             || !has_attr(attrs, "href")
@@ -183,13 +230,6 @@ pub(super) fn reject_invalid_hemx_attr_placement(
         return Err(invalid_hemx_placement(
             path,
             "data-hemx-sse",
-            "expected placement on the same element as `data-hemx-root`",
-        ));
-    }
-    if has_attr(attrs, "data-hemx-ws") && !has_attr(attrs, "data-hemx-root") {
-        return Err(invalid_hemx_placement(
-            path,
-            "data-hemx-ws",
             "expected placement on the same element as `data-hemx-root`",
         ));
     }

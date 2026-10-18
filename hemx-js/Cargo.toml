@@ -15,3 +15,6 @@ path = "src/lib.rs"
 
 [build-dependencies]
 sha2 = "0.10"
+
+[dev-dependencies]
+sha2 = "0.10"

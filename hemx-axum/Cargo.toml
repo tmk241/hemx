@@ -16,10 +16,13 @@ path = "src/lib.rs"
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["multipart", "tokio"] }
 futures-util = { version = "0.3", default-features = false }
-hemx-core = { version = "0.4.0", path = "../hemx-core" }
-hemx-js = { version = "0.4.0", path = "../hemx-js" }
+hemx-core = { version = "0.5.0", path = "../hemx-core" }
+hemplate-runtime = { version = "0.3.0", default-features = false }
+hemx-js = { version = "0.5.0", path = "../hemx-js" }
+tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [dev-dependencies]
+hemplate = { version = "0.4.0", default-features = false, features = ["derive"] }
 scraper = "0.25"
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
 tower = { version = "0.5", features = ["util"] }

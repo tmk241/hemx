@@ -7,9 +7,16 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 use serde::{Deserialize, Serialize};
 
-pub const SURFACE_SCHEMA_VERSION: u32 = 1;
-pub const EFFECT_BATCH_ABI_VERSION: u32 = 1;
-pub const RUNTIME_ABI_VERSION: u32 = 1;
+pub const SURFACE_SCHEMA_VERSION: u32 = 2;
+pub const EFFECT_BATCH_ABI_VERSION: u32 = 3;
+pub const RUNTIME_ABI_VERSION: u32 = 3;
+
+mod fold;
+mod rows;
+mod wire;
+pub use fold::{fold_batches, fold_run, folds_into};
+pub use rows::{order_hash, row_steps, RowStep};
+pub use wire::{WireError, MAX_BATCH_BYTES, MAX_EFFECTS, MAX_FIELD_BYTES, MAX_ROW_KEYS};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct BuildFingerprint(pub u64);
@@ -85,16 +92,6 @@ pub enum PatchMode {
     Morph,
     Replace,
 }
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub enum InsertPosition {
-    First,
-    Last,
-    Before(ResourceRef),
-    After(ResourceRef),
-}
-
-pub type MovePosition = InsertPosition;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum ScrollBlock {
@@ -401,17 +398,26 @@ pub enum Effect {
         mode: PatchMode,
         html: SafeHtml,
     },
-    Insert {
+    /// Declare a collection's complete state: exactly `order`, in that order,
+    /// with `rows` supplying the elements of new or changed rows. Keys absent
+    /// from `order` are removed; ordered keys without a row keep their element.
+    Rows {
+        /// The existing collection destination, optionally scoped to one instance.
         target: ResourceRef,
-        position: InsertPosition,
-        html: SafeHtml,
+        order: Vec<String>,
+        rows: Vec<(String, SafeHtml)>,
     },
-    Remove {
+    /// Change a collection from the order named `from` to the order named `to`
+    /// (see [`order_hash`]) by applying `steps` in sequence. `rows` supplies the
+    /// elements of created rows and new content for live ones. A client applies
+    /// it only at `from`, skips it at `to`, and rejects it anywhere else, so it
+    /// is as idempotent as [`Effect::Rows`] while carrying only what changed.
+    RowsDelta {
         target: ResourceRef,
-    },
-    Move {
-        target: ResourceRef,
-        position: MovePosition,
+        from: u64,
+        to: u64,
+        steps: Vec<RowStep>,
+        rows: Vec<(String, SafeHtml)>,
     },
     Focus {
         target: ResourceRef,
@@ -437,424 +443,6 @@ pub struct EffectBatch {
     pub abi_version: u32,
     pub fingerprint: BuildFingerprint,
     pub ops: Vec<Effect>,
-}
-
-impl EffectBatch {
-    /// The versioned hemx codec is the sole public `EffectBatch` wire API.
-    /// ```compile_fail
-    /// let batch = hemx_core::EffectBatch::new(hemx_core::BuildFingerprint(1));
-    /// let _ = batch.to_postcard();
-    /// ```
-    /// Return the exact number of bytes produced by [`Self::to_wire`].
-    pub fn encoded_len(&self) -> usize {
-        batch_wire_len(self)
-    }
-
-    pub fn to_wire(&self) -> Vec<u8> {
-        let encoded_len = self.encoded_len();
-        let mut out = Vec::with_capacity(encoded_len);
-        let initial_capacity = out.capacity();
-        write_batch(self, &mut out);
-        debug_assert_eq!(out.len(), encoded_len);
-        debug_assert_eq!(out.capacity(), initial_capacity);
-        out
-    }
-
-    pub fn from_wire(bytes: &[u8]) -> Result<Self, WireError> {
-        read_batch(bytes)
-    }
-
-    pub const fn is_compatible(&self) -> bool {
-        self.abi_version == EFFECT_BATCH_ABI_VERSION
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WireError {
-    BadMagic,
-    UnsupportedVersion,
-    Truncated,
-    InvalidUtf8,
-    UnknownTag,
-    TrailingBytes,
-}
-
-const WIRE_MAGIC: &[u8; 4] = b"HEMX";
-const WIRE_BATCH_HEADER_LEN: usize = WIRE_MAGIC.len() + 4 + 8 + 4;
-
-fn batch_wire_len(batch: &EffectBatch) -> usize {
-    WIRE_BATCH_HEADER_LEN + batch.ops.iter().map(effect_wire_len).sum::<usize>()
-}
-
-fn effect_wire_len(effect: &Effect) -> usize {
-    1 + match effect {
-        Effect::Patch { target, html, .. } => {
-            ref_wire_len(target) + 1 + str_wire_len(html.as_str())
-        }
-        Effect::Insert {
-            target,
-            position,
-            html,
-        } => ref_wire_len(target) + position_wire_len(position) + str_wire_len(html.as_str()),
-        Effect::Remove { target } => ref_wire_len(target),
-        Effect::Move { target, position } => ref_wire_len(target) + position_wire_len(position),
-        Effect::Focus { target, .. } => ref_wire_len(target) + 1,
-        Effect::Scroll { target, .. } => ref_wire_len(target) + 2,
-        Effect::Visit { url, .. } => str_wire_len(url) + 1,
-        Effect::Dispatch { event, payload } => {
-            str_wire_len(event.as_str()) + str_wire_len_bytes(payload)
-        }
-    }
-}
-
-fn position_wire_len(position: &InsertPosition) -> usize {
-    1 + match position {
-        InsertPosition::First | InsertPosition::Last => 0,
-        InsertPosition::Before(reference) | InsertPosition::After(reference) => {
-            ref_wire_len(reference)
-        }
-    }
-}
-
-fn str_wire_len_bytes(value: &[u8]) -> usize {
-    4 + value.len()
-}
-
-fn ref_wire_len(reference: &ResourceRef) -> usize {
-    1 + 4
-        + 1
-        + match &reference.scope {
-            None => 0,
-            Some(ScopeKey::KeyValue(value) | ScopeKey::Field(value)) => str_wire_len(value),
-        }
-}
-
-const fn str_wire_len(value: &str) -> usize {
-    4 + value.len()
-}
-
-fn write_batch(batch: &EffectBatch, out: &mut Vec<u8>) {
-    out.extend_from_slice(WIRE_MAGIC);
-    write_u32(batch.abi_version, out);
-    write_u64(batch.fingerprint.0, out);
-    write_u32(batch.ops.len() as u32, out);
-    for op in &batch.ops {
-        write_effect(op, out);
-    }
-}
-
-fn write_effect(effect: &Effect, out: &mut Vec<u8>) {
-    match effect {
-        Effect::Patch { target, mode, html } => {
-            write_u8(0, out);
-            write_ref(target, out);
-            write_u8(
-                match mode {
-                    PatchMode::Morph => 0,
-                    PatchMode::Replace => 1,
-                },
-                out,
-            );
-            write_str(html.as_str(), out);
-        }
-        Effect::Insert {
-            target,
-            position,
-            html,
-        } => {
-            write_u8(1, out);
-            write_ref(target, out);
-            write_position(position, out);
-            write_str(html.as_str(), out);
-        }
-        Effect::Remove { target } => {
-            write_u8(2, out);
-            write_ref(target, out);
-        }
-        Effect::Move { target, position } => {
-            write_u8(3, out);
-            write_ref(target, out);
-            write_position(position, out);
-        }
-        Effect::Focus {
-            target,
-            prevent_scroll,
-        } => {
-            write_u8(4, out);
-            write_ref(target, out);
-            write_u8(u8::from(*prevent_scroll), out);
-        }
-        Effect::Scroll {
-            target,
-            block,
-            behavior,
-        } => {
-            write_u8(5, out);
-            write_ref(target, out);
-            write_u8(
-                match block {
-                    ScrollBlock::Start => 0,
-                    ScrollBlock::Center => 1,
-                    ScrollBlock::End => 2,
-                    ScrollBlock::Nearest => 3,
-                },
-                out,
-            );
-            write_u8(
-                match behavior {
-                    ScrollBehavior::Auto => 0,
-                    ScrollBehavior::Instant => 1,
-                    ScrollBehavior::Smooth => 2,
-                },
-                out,
-            );
-        }
-        Effect::Visit { url, history } => {
-            write_u8(6, out);
-            write_str(url, out);
-            write_u8(
-                match history {
-                    HistoryMode::Push => 0,
-                    HistoryMode::Replace => 1,
-                },
-                out,
-            );
-        }
-        Effect::Dispatch { event, payload } => {
-            write_u8(7, out);
-            write_str(event.as_str(), out);
-            write_bytes(payload, out);
-        }
-    }
-}
-
-fn write_position(position: &InsertPosition, out: &mut Vec<u8>) {
-    match position {
-        InsertPosition::First => write_u8(0, out),
-        InsertPosition::Last => write_u8(1, out),
-        InsertPosition::Before(reference) => {
-            write_u8(2, out);
-            write_ref(reference, out);
-        }
-        InsertPosition::After(reference) => {
-            write_u8(3, out);
-            write_ref(reference, out);
-        }
-    }
-}
-
-fn write_ref(reference: &ResourceRef, out: &mut Vec<u8>) {
-    write_u8(
-        match reference.resource.kind {
-            ResourceKind::Slot => 0,
-            ResourceKind::Handle => 2,
-            ResourceKind::Form => 3,
-        },
-        out,
-    );
-    write_u32(reference.resource.id, out);
-    match &reference.scope {
-        None => write_u8(0, out),
-        Some(ScopeKey::KeyValue(value)) => {
-            write_u8(1, out);
-            write_str(value, out);
-        }
-        Some(ScopeKey::Field(value)) => {
-            write_u8(2, out);
-            write_str(value, out);
-        }
-    }
-}
-
-fn write_bytes(value: &[u8], out: &mut Vec<u8>) {
-    write_u32(value.len() as u32, out);
-    out.extend_from_slice(value);
-}
-
-fn write_str(value: &str, out: &mut Vec<u8>) {
-    write_u32(value.len() as u32, out);
-    out.extend_from_slice(value.as_bytes());
-}
-
-fn write_u8(value: u8, out: &mut Vec<u8>) {
-    out.push(value);
-}
-
-fn write_u32(value: u32, out: &mut Vec<u8>) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn write_u64(value: u64, out: &mut Vec<u8>) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-struct WireReader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> WireReader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
-    }
-
-    fn finish(&self) -> Result<(), WireError> {
-        if self.offset == self.bytes.len() {
-            Ok(())
-        } else {
-            Err(WireError::TrailingBytes)
-        }
-    }
-
-    fn read_u8(&mut self) -> Result<u8, WireError> {
-        let bytes = self.read_exact(1)?;
-        Ok(bytes[0])
-    }
-
-    fn read_u32(&mut self) -> Result<u32, WireError> {
-        let bytes = self.read_exact(4)?;
-        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-    }
-
-    fn read_u64(&mut self) -> Result<u64, WireError> {
-        let bytes = self.read_exact(8)?;
-        Ok(u64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ]))
-    }
-
-    fn read_str(&mut self) -> Result<String, WireError> {
-        let len = self.read_u32()? as usize;
-        let bytes = self.read_exact(len)?;
-        core::str::from_utf8(bytes)
-            .map(ToString::to_string)
-            .map_err(|_| WireError::InvalidUtf8)
-    }
-
-    fn read_bytes(&mut self) -> Result<Vec<u8>, WireError> {
-        let len = self.read_u32()? as usize;
-        Ok(self.read_exact(len)?.to_vec())
-    }
-
-    fn read_exact(&mut self, len: usize) -> Result<&'a [u8], WireError> {
-        let remaining = &self.bytes[self.offset..];
-        let bytes = remaining.get(..len).ok_or(WireError::Truncated)?;
-        self.offset += len;
-        Ok(bytes)
-    }
-}
-
-fn read_batch(bytes: &[u8]) -> Result<EffectBatch, WireError> {
-    let mut reader = WireReader::new(bytes);
-    if reader.read_exact(WIRE_MAGIC.len())? != WIRE_MAGIC {
-        return Err(WireError::BadMagic);
-    }
-    let abi_version = reader.read_u32()?;
-    if abi_version != EFFECT_BATCH_ABI_VERSION {
-        return Err(WireError::UnsupportedVersion);
-    }
-    let fingerprint = BuildFingerprint(reader.read_u64()?);
-    let ops_len = reader.read_u32()?;
-    let mut ops = Vec::new();
-    for _ in 0..ops_len {
-        ops.push(read_effect(&mut reader)?);
-    }
-    reader.finish()?;
-    Ok(EffectBatch {
-        abi_version,
-        fingerprint,
-        ops,
-    })
-}
-
-fn read_effect(reader: &mut WireReader<'_>) -> Result<Effect, WireError> {
-    match reader.read_u8()? {
-        0 => Ok(Effect::Patch {
-            target: read_ref(reader)?,
-            mode: match reader.read_u8()? {
-                0 => PatchMode::Morph,
-                1 => PatchMode::Replace,
-                _ => return Err(WireError::UnknownTag),
-            },
-            html: SafeHtml::trusted(reader.read_str()?),
-        }),
-        1 => Ok(Effect::Insert {
-            target: read_ref(reader)?,
-            position: read_position(reader)?,
-            html: SafeHtml::trusted(reader.read_str()?),
-        }),
-        2 => Ok(Effect::Remove {
-            target: read_ref(reader)?,
-        }),
-        3 => Ok(Effect::Move {
-            target: read_ref(reader)?,
-            position: read_position(reader)?,
-        }),
-        4 => Ok(Effect::Focus {
-            target: read_ref(reader)?,
-            prevent_scroll: match reader.read_u8()? {
-                0 => false,
-                1 => true,
-                _ => return Err(WireError::UnknownTag),
-            },
-        }),
-        5 => Ok(Effect::Scroll {
-            target: read_ref(reader)?,
-            block: match reader.read_u8()? {
-                0 => ScrollBlock::Start,
-                1 => ScrollBlock::Center,
-                2 => ScrollBlock::End,
-                3 => ScrollBlock::Nearest,
-                _ => return Err(WireError::UnknownTag),
-            },
-            behavior: match reader.read_u8()? {
-                0 => ScrollBehavior::Auto,
-                1 => ScrollBehavior::Instant,
-                2 => ScrollBehavior::Smooth,
-                _ => return Err(WireError::UnknownTag),
-            },
-        }),
-        6 => Ok(Effect::Visit {
-            url: reader.read_str()?,
-            history: match reader.read_u8()? {
-                0 => HistoryMode::Push,
-                1 => HistoryMode::Replace,
-                _ => return Err(WireError::UnknownTag),
-            },
-        }),
-        7 => Ok(Effect::Dispatch {
-            event: reader.read_str()?,
-            payload: reader.read_bytes()?,
-        }),
-        _ => Err(WireError::UnknownTag),
-    }
-}
-
-fn read_position(reader: &mut WireReader<'_>) -> Result<InsertPosition, WireError> {
-    match reader.read_u8()? {
-        0 => Ok(InsertPosition::First),
-        1 => Ok(InsertPosition::Last),
-        2 => Ok(InsertPosition::Before(read_ref(reader)?)),
-        3 => Ok(InsertPosition::After(read_ref(reader)?)),
-        _ => Err(WireError::UnknownTag),
-    }
-}
-
-fn read_ref(reader: &mut WireReader<'_>) -> Result<ResourceRef, WireError> {
-    let kind = match reader.read_u8()? {
-        0 => ResourceKind::Slot,
-        2 => ResourceKind::Handle,
-        3 => ResourceKind::Form,
-        _ => return Err(WireError::UnknownTag),
-    };
-    let resource = ResourceId::new(kind, reader.read_u32()?);
-    let scope = match reader.read_u8()? {
-        0 => None,
-        1 => Some(ScopeKey::KeyValue(reader.read_str()?)),
-        2 => Some(ScopeKey::Field(reader.read_str()?)),
-        _ => return Err(WireError::UnknownTag),
-    };
-    Ok(ResourceRef { resource, scope })
 }
 
 pub trait IntoEffect {
@@ -965,8 +553,72 @@ impl<T> Slot<T> {
         self.id
     }
 
+    /// Declare this collection's complete key order plus the elements of rows
+    /// that are new or changed. Keys left out of `order` are removed.
+    pub fn rows_html<O, K, H>(
+        self,
+        order: impl IntoIterator<Item = O>,
+        rows: impl IntoIterator<Item = (K, H)>,
+    ) -> Effect
+    where
+        O: ToString,
+        K: ToString,
+        H: Into<SafeHtml>,
+    {
+        Effect::Rows {
+            target: ResourceRef::unscoped(self.id),
+            order: order.into_iter().map(|key| key.to_string()).collect(),
+            rows: rows
+                .into_iter()
+                .map(|(key, html)| (key.to_string(), html.into()))
+                .collect(),
+        }
+    }
+
+    /// Change this collection from the key order `before` to `after`, supplying
+    /// the elements of new rows and the new content of changed ones. Only the
+    /// steps between the two orders travel; see [`Effect::RowsDelta`].
+    pub fn rows_delta_html<B, A, K, H>(
+        self,
+        before: impl IntoIterator<Item = B>,
+        after: impl IntoIterator<Item = A>,
+        rows: impl IntoIterator<Item = (K, H)>,
+    ) -> Effect
+    where
+        B: ToString,
+        A: ToString,
+        K: ToString,
+        H: Into<SafeHtml>,
+    {
+        let before: Vec<String> = before.into_iter().map(|key| key.to_string()).collect();
+        let after: Vec<String> = after.into_iter().map(|key| key.to_string()).collect();
+        Effect::RowsDelta {
+            target: ResourceRef::unscoped(self.id),
+            from: order_hash(&before),
+            to: order_hash(&after),
+            steps: row_steps(&before, &after),
+            rows: rows
+                .into_iter()
+                .map(|(key, html)| (key.to_string(), html.into()))
+                .collect(),
+        }
+    }
+
+    /// Patch this slot with escaped text, not interpreted markup.
     pub fn text(self, value: impl ToString) -> Effect {
-        self.html(SafeHtml::trusted(value.to_string()))
+        let text = value.to_string();
+        let mut escaped = String::with_capacity(text.len());
+        for character in text.chars() {
+            match character {
+                '&' => escaped.push_str("&amp;"),
+                '<' => escaped.push_str("&lt;"),
+                '>' => escaped.push_str("&gt;"),
+                '"' => escaped.push_str("&quot;"),
+                '\'' => escaped.push_str("&#39;"),
+                _ => escaped.push(character),
+            }
+        }
+        self.html(SafeHtml::trusted(escaped))
     }
 
     pub fn html(self, value: impl Into<SafeHtml>) -> Effect {
@@ -1013,28 +665,6 @@ where
         self.id
     }
 
-    pub fn append_text(self, key: K, value: T) -> Effect
-    where
-        T: ToString,
-    {
-        Effect::Insert {
-            target: ResourceRef::scoped(self.id, ScopeKey::KeyValue(key.to_string())),
-            position: InsertPosition::Last,
-            html: SafeHtml::trusted(value.to_string()),
-        }
-    }
-
-    pub fn prepend_text(self, key: K, value: T) -> Effect
-    where
-        T: ToString,
-    {
-        Effect::Insert {
-            target: ResourceRef::scoped(self.id, ScopeKey::KeyValue(key.to_string())),
-            position: InsertPosition::First,
-            html: SafeHtml::trusted(value.to_string()),
-        }
-    }
-
     pub fn replace_text(self, key: K, value: T) -> Effect
     where
         T: ToString,
@@ -1050,22 +680,6 @@ where
         }
     }
 
-    pub fn append_html(self, key: K, value: impl Into<SafeHtml>) -> Effect {
-        Effect::Insert {
-            target: ResourceRef::scoped(self.id, ScopeKey::KeyValue(key.to_string())),
-            position: InsertPosition::Last,
-            html: value.into(),
-        }
-    }
-
-    pub fn prepend_html(self, key: K, value: impl Into<SafeHtml>) -> Effect {
-        Effect::Insert {
-            target: ResourceRef::scoped(self.id, ScopeKey::KeyValue(key.to_string())),
-            position: InsertPosition::First,
-            html: value.into(),
-        }
-    }
-
     pub fn replace_html(self, key: K, value: impl Into<SafeHtml>) -> Effect {
         let key = key.to_string();
         Effect::Patch {
@@ -1075,29 +689,6 @@ where
             },
             mode: PatchMode::Morph,
             html: value.into(),
-        }
-    }
-
-    pub fn remove(self, key: K) -> Effect {
-        Effect::Remove {
-            target: ResourceRef::scoped(self.id, ScopeKey::KeyValue(key.to_string())),
-        }
-    }
-
-    pub fn move_before(self, key: K, before: K) -> Effect {
-        Effect::Move {
-            target: ResourceRef::scoped(self.id, ScopeKey::KeyValue(key.to_string())),
-            position: MovePosition::Before(ResourceRef::scoped(
-                self.id,
-                ScopeKey::KeyValue(before.to_string()),
-            )),
-        }
-    }
-
-    pub fn move_to_end(self, key: K) -> Effect {
-        Effect::Move {
-            target: ResourceRef::scoped(self.id, ScopeKey::KeyValue(key.to_string())),
-            position: MovePosition::Last,
         }
     }
 }
@@ -1158,7 +749,7 @@ impl core::fmt::Display for FormError {
     }
 }
 
-impl std::error::Error for FormError {}
+impl core::error::Error for FormError {}
 
 pub trait FormValue: Sized {
     fn parse_form_value(value: &str) -> Result<Self, String>;
@@ -1166,10 +757,10 @@ pub trait FormValue: Sized {
 
 impl<T> FormValue for T
 where
-    T: std::str::FromStr,
+    T: core::str::FromStr,
 {
     fn parse_form_value(value: &str) -> Result<Self, String> {
-        value.parse().map_err(|_| "invalid form value".to_owned())
+        value.parse().map_err(|_| "invalid form value".to_string())
     }
 }
 

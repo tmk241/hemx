@@ -2,25 +2,39 @@
   const ROOT = "data-hemx-root";
   const ACTION = "data-hemx-action";
   const RESOURCE = "data-hemx-resource";
-  const runtimeAbiVersion = 1;
+  const COLLECTION = "data-hemx-collection";
+  const KEY = "data-hemx-key";
+  const runtimeAbiVersion = 3;
+  const EFFECT_BATCH_ABI_VERSION = 3;
   const BUILD = "data-hemx-build";
   const ISLAND = "data-hemx-island";
+  const dom = nativeDOM();
+  const { rootOf, forEachElement, forEachOwned, select, firstElement, attrEquals, elements, unique,
+    targetFor, collectionTarget, nearestKey, fieldTargets } =
+    createResources(dom, { ROOT, ISLAND, RESOURCE, COLLECTION, KEY, ACTION });
+  const morphing = createMorpher(dom, { ROOT, ISLAND, RESOURCE, KEY }, rootOf, updatePendingAttributes);
   const pending = new WeakMap();
   const queues = new WeakMap();
   const timers = new WeakMap();
   const everyTimers = new WeakMap();
   const revealObservers = new WeakMap();
-  const revealed = new WeakSet();
+  const revealed = new WeakMap();
+  const revealBindings = new WeakMap();
   const pendingClassStates = new WeakMap();
   const indicatorStates = new WeakMap();
   const busyStates = new WeakMap();
   const disabledStates = new WeakMap();
   const sseSources = new WeakMap();
-  const webSockets = new WeakMap();
   const boundRoots = new WeakSet();
   const dragKeys = new WeakMap();
   const activeRequests = new Set();
   const REQUEST_TIMEOUT_MS = 10_000;
+  const forms = createForms(dom, rootOf,
+    (form, source) => handlesEvent(form, "submit") && Boolean(
+      formHandleId(form) || (ownsSubmitter(form, source) && handleId(source)) ||
+      pageFormHistoryMode(source, form) || boostRoot(form)),
+    (form, source, capture) => schedule(form, "submit", source, capture));
+  const isSubmitter = forms.isSubmitter;
 
   window.addEventListener("pagehide", () => {
     for (const controller of activeRequests) {
@@ -29,22 +43,18 @@
   });
 
   function roots() {
-    const found = [];
-    forEachElement(document, (el) => { if (el.hasAttribute(ROOT)) found.push(el); });
-    return found;
-  }
-
-  function rootOf(node) {
-    for (let el = node; el && el !== document; el = el.parentElement) {
-      if (el.hasAttribute && el.hasAttribute(ROOT)) return el;
-    }
-    return null;
+    return dom.query(document, `[${ROOT}]`);
   }
 
   function formOwner(el) {
-    if (!el || el.tagName === "FORM") return el;
-    if (el.getAttribute && el.getAttribute("form")) return elementById(rootOf(el) || document, el.getAttribute("form"));
-    return closestInRoot(el, rootOf(el) || document, (node) => node.tagName === "FORM");
+    if (!el || el instanceof HTMLFormElement) return el;
+    const owner = rootOf(el);
+    if (!owner) return null;
+    if (el instanceof HTMLInputElement || el instanceof HTMLButtonElement ||
+        el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement) {
+      return el.form && rootOf(el.form) === owner ? el.form : null;
+    }
+    return closestInRoot(el, owner, (node) => node instanceof HTMLFormElement);
   }
 
   function elementById(scope, id) {
@@ -54,21 +64,22 @@
 
   function formHandleId(form) {
     if (!form) return null;
-    const holder = form.hasAttribute(ACTION) ? form : firstElement(form, (el) => el.hasAttribute(ACTION));
-    const raw = holder && holder.getAttribute(ACTION);
+    const holder = dom.has(form, ACTION) ? form : firstElement(form, (el) => dom.has(el, ACTION));
+    const raw = holder && dom.attr(holder, ACTION);
     return raw && /^\d+$/.test(raw) ? raw : null;
   }
 
   function closestInRoot(start, root, predicate) {
-    for (let node = start; node && node !== root.parentNode; node = node.parentElement) {
-      if (predicate(node)) return node;
-      if (node === root) break;
+    if (!root) return null;
+    for (let node = start; node; node = dom.parentElement(node)) {
+      if (dom.element(node) && predicate(node)) return node;
+      if (node === root || dom.has(node, ISLAND) || dom.has(node, ROOT)) break;
     }
     return null;
   }
 
   function handleId(el) {
-    const raw = el && el.getAttribute(ACTION);
+    const raw = el && dom.attr(el, ACTION);
     return raw && /^\d+$/.test(raw) ? raw : null;
   }
 
@@ -77,24 +88,54 @@
   }
 
   function requestPolicy(el, eventName) {
-    const policy = normalizedPolicy(el.getAttribute("data-hemx-policy"));
+    const policy = normalizedPolicy(dom.attr(el, "data-hemx-policy"));
     if (policy) return policy;
-    if (el.hasAttribute("data-hemx-debounce") || eventName === "input") return "latest";
-    if (el.tagName === "FORM") return "drop";
+    if (dom.has(el, "data-hemx-debounce") || eventName === "input") return "latest";
+    if (el instanceof HTMLFormElement) return "drop";
     return "parallel";
   }
 
-  function showPending(el, on) {
-    const klass = el.getAttribute("data-hemx-pending-class");
-    if (klass) togglePendingClass(el, klass, on);
-    toggleBusy(el, on);
-    const root = rootOf(el) || document;
-    forEachElement(root, (i) => { if (i.hasAttribute("data-hemx-indicator")) toggleIndicator(i, on); });
-    if (el.hasAttribute("data-hemx-disable-while-pending")) {
-      const controls = [];
-      if (isDisableControl(el)) controls.push(el);
-      forEachElement(el, (child) => { if (isDisableControl(child)) controls.push(child); });
-      controls.forEach((c) => toggleDisabled(c, on));
+  function beginPending(el, root) {
+    const klass = dom.attr(el, "data-hemx-pending-class");
+    const indicators = elements(root, (node) => dom.has(node, "data-hemx-indicator"));
+    const controls = dom.has(el, "data-hemx-disable-while-pending") ? elements(el, isDisableControl) : [];
+    if (klass) togglePendingClass(el, klass, true);
+    toggleBusy(el, true);
+    indicators.forEach((node) => toggleIndicator(node, true));
+    controls.forEach((node) => toggleDisabled(node, true));
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      if (klass) togglePendingClass(el, klass, false);
+      toggleBusy(el, false);
+      indicators.forEach((node) => toggleIndicator(node, false));
+      controls.forEach((node) => toggleDisabled(node, false));
+    };
+  }
+
+  // Pending feedback is a temporary transport overlay. A server update changes
+  // the state restored by the remaining requests, not just the visible overlay.
+  function updatePendingAttributes(node, source) {
+    const busy = busyStates.get(node);
+    if (busy) {
+      busy.value = dom.attr(source, "aria-busy");
+      dom.setAttribute(node, "aria-busy", "true");
+    }
+    const classes = pendingClassStates.get(node);
+    if (classes) for (const [name, state] of classes) {
+      state.hadClass = dom.classList(source).contains(name);
+      dom.classList(node).add(name);
+    }
+    const indicator = indicatorStates.get(node);
+    if (indicator) {
+      indicator.hidden = dom.attr(source, "hidden");
+      dom.removeAttribute(node, "hidden");
+    }
+    const disabled = disabledStates.get(node);
+    if (disabled) {
+      disabled.disabled = source.disabled;
+      node.disabled = true;
     }
   }
 
@@ -102,33 +143,36 @@
     const state = busyStates.get(el);
     if (on) {
       if (state) state.count += 1;
-      else busyStates.set(el, { count: 1, value: el.getAttribute("aria-busy") });
-      el.setAttribute("aria-busy", "true");
+      else busyStates.set(el, { count: 1, value: dom.attr(el, "aria-busy") });
+      dom.setAttribute(el, "aria-busy", "true");
       return;
     }
     if (!state) return;
     state.count -= 1;
     if (state.count <= 0) {
-      if (state.value === null) el.removeAttribute("aria-busy");
-      else el.setAttribute("aria-busy", state.value);
+      if (state.value === null) dom.removeAttribute(el, "aria-busy");
+      else dom.setAttribute(el, "aria-busy", state.value);
       busyStates.delete(el);
     }
   }
 
   function togglePendingClass(el, klass, on) {
-    const state = pendingClassStates.get(el);
+    let classes = pendingClassStates.get(el);
+    const state = classes && classes.get(klass);
     if (on) {
+      if (!classes) { classes = new Map(); pendingClassStates.set(el, classes); }
       if (state) state.count += 1;
-      else pendingClassStates.set(el, { count: 1, className: klass, hadClass: el.classList.contains(klass) });
-      el.classList.add(klass);
+      else classes.set(klass, { count: 1, hadClass: dom.classList(el).contains(klass) });
+      dom.classList(el).add(klass);
       return;
     }
     if (!state) return;
     state.count -= 1;
     if (state.count <= 0) {
-      if (state.hadClass) el.classList.add(state.className);
-      else el.classList.remove(state.className);
-      pendingClassStates.delete(el);
+      if (state.hadClass) dom.classList(el).add(klass);
+      else dom.classList(el).remove(klass);
+      classes.delete(klass);
+      if (!classes.size) pendingClassStates.delete(el);
     }
   }
 
@@ -136,14 +180,15 @@
     const state = indicatorStates.get(indicator);
     if (on) {
       if (state) state.count += 1;
-      else indicatorStates.set(indicator, { count: 1, hidden: indicator.hidden });
-      indicator.hidden = false;
+      else indicatorStates.set(indicator, { count: 1, hidden: dom.attr(indicator, "hidden") });
+      dom.removeAttribute(indicator, "hidden");
       return;
     }
     if (!state) return;
     state.count -= 1;
     if (state.count <= 0) {
-      indicator.hidden = state.hidden;
+      if (state.hidden === null) dom.removeAttribute(indicator, "hidden");
+      else dom.setAttribute(indicator, "hidden", state.hidden);
       indicatorStates.delete(indicator);
     }
   }
@@ -164,27 +209,35 @@
     }
   }
 
-  function formDataFor(el, eventName, source = el) {
-    const form = formOwner(el);
-    const data = form ? new FormData(form) : new FormData();
-    if (form && source && source !== form && source.name && !source.disabled) data.append(source.name, source.value);
-    const id = handleId(el) || formHandleId(form);
-    if (id && !data.has("__h")) data.set("__h", id);
+  function ownsSubmitter(form, source) {
+    const sourceOwner = rootOf(source);
+    return isSubmitter(source) && source.form === form &&
+      (sourceOwner === rootOf(form) || (!sourceOwner && !closestInRoot(source, document, (node) => dom.has(node, ISLAND))));
+  }
+
+  function formDataFor(el, eventName, source = el, capture) {
+    const form = capture ? capture.form : formOwner(el);
+    const data = capture ? capture.data : form ? successfulFormData(form, source) : new FormData();
+    const handled = eventName === "submit" && ownsSubmitter(form, source) && handleId(source) ? source : el;
+    const id = handleId(handled) || formHandleId(form);
+    if (id) data.set("__h", id);
+    // Request fields are explicit: form controls plus data-hemx-param-*, and the
+    // reserved __drag key for drops. Ordinary data-* stays DOM metadata.
+
     const dragKey = eventName === "drop" && dragKeys.get(rootOf(el));
-    if (dragKey && !data.has("work_id")) data.set("work_id", dragKey);
-    for (const { name, value } of Array.from(el.attributes || [])) {
-      if (name.startsWith("data-") && !name.startsWith("data-hemx-") && name !== ACTION && name !== RESOURCE) {
-        data.set(name.slice(5).replace(/-/g, "_"), value);
-      }
+    if (dragKey) data.set("__drag", dragKey);
+    const PARAM = "data-hemx-param-";
+    for (const { name, value } of dom.attributes(handled)) {
+      if (name.startsWith(PARAM) && name.length > PARAM.length) data.set(name.slice(PARAM.length).replace(/-/g, "_"), value);
     }
-    return { form, data, multipart: form && String(form.enctype).toLowerCase() === "multipart/form-data" };
+    return { form, data, submission: capture ? capture.submission : forms.submission(form, source) };
   }
 
   function urlEncoded(data) {
     const encoded = new URLSearchParams();
     for (const [name, value] of data.entries()) {
-      if (typeof File !== "undefined" && value instanceof File) continue;
-      encoded.append(name, value);
+      const text = value instanceof File ? value.name : value;
+      encoded.append(name.replace(/\r\n|\r|\n/g, "\r\n"), text.replace(/\r\n|\r|\n/g, "\r\n"));
     }
     return encoded;
   }
@@ -193,24 +246,14 @@
     return multipart ? data : urlEncoded(data);
   }
 
-  function requestUrl(form, data, method) {
-    const url = new URL((form && form.action) || location.href, location.href);
+  function requestUrl(action, data, method) {
+    const url = new URL(action, location.href);
     if (method === "GET") url.search = urlEncoded(data).toString();
     return url.href;
   }
 
-  function pageRequestUrl(form, source) {
-    const url = new URL((form && form.action) || location.href, location.href);
-    url.search = urlEncoded(successfulFormData(form, source)).toString();
-    return url.href;
-  }
-
   function successfulFormData(form, source) {
-    try {
-      return source && source !== form ? new FormData(form, source) : new FormData(form);
-    } catch (_) {
-      return new FormData(form);
-    }
+    return isSubmitter(source) ? new FormData(form, source) : new FormData(form);
   }
 
   function pageFormHistoryMode(source, form) {
@@ -218,15 +261,41 @@
   }
 
   function boostRoot(el) {
-    return el && closestInRoot(el.parentElement, rootOf(el), (node) => node.hasAttribute("data-hemx-boost"));
+    return el && closestInRoot(dom.parentElement(el), rootOf(el), (node) => dom.has(node, "data-hemx-boost"));
   }
 
   function historyMode(el, fallback) {
     if (!el) return fallback;
-    const value = el.getAttribute("data-hemx-history") || el.getAttribute("data-hemx-nav") || "";
+    const value = dom.attr(el, "data-hemx-history") || dom.attr(el, "data-hemx-nav") || "";
     if (value === "push" || value === "replace" || value === "none") return value;
-    if (el.hasAttribute("data-hemx-history") || el.hasAttribute("data-hemx-nav")) return fallback || "push";
+    if (dom.has(el, "data-hemx-history") || dom.has(el, "data-hemx-nav")) return fallback || "push";
     return fallback;
+  }
+
+  // A rejected response is never read. Cancel its body so the stream and
+  // connection are released now, not whenever the response is collected.
+  function discard(response) {
+    response.body?.cancel().catch(() => {});
+  }
+
+  // A response from another build means this page is stale, whatever its status
+  // (a stale form submission is answered 409). Report once; never replay.
+
+  function staleError() {
+    const error = new Error("hemx surface fingerprint mismatch; reload this page");
+    error.stale = true;
+    return error;
+  }
+
+  function requireUsable(response, root) {
+    if (!compatibleFingerprint(response, root)) {
+      discard(response);
+      throw staleError();
+    }
+    if (!response.ok) {
+      discard(response);
+      throw httpError(response);
+    }
   }
 
   function httpError(response) {
@@ -235,140 +304,125 @@
     return error;
   }
 
-  function showError(el, error) {
-    const root = rootOf(el) || document;
-    const message = error ? (error.status ? `Request failed (${error.status})` : "Request failed") : "";
-    forEachElement(root, (outlet) => {
-      if (!outlet.hasAttribute("data-hemx-error")) return;
-      outlet.textContent = message;
-      if (message) outlet.removeAttribute("hidden");
-      else outlet.setAttribute("hidden", "");
+  function showError(el, error, root = rootOf(el)) {
+    const message = !error ? "" : error.stale ? "This page is out of date. Reload to continue."
+      : error.status ? `Request failed (${error.status})` : "Request failed";
+    select(root, "[data-hemx-error]").forEach((outlet) => {
+      dom.setText(outlet, message);
+      if (message) dom.removeAttribute(outlet, "hidden");
+      else dom.setAttribute(outlet, "hidden", "");
     });
   }
 
 
-  async function send(el, eventName, source = el) {
-    if (el.getAttribute("data-hemx-confirm") && !confirm(el.getAttribute("data-hemx-confirm"))) return;
-    const { form, data, multipart } = formDataFor(el, eventName, source);
-    const target = form || el;
-    const policy = requestPolicy(target, eventName);
-    const active = pending.get(target);
-    if (active && policy === "drop") return;
-    if (active && policy === "latest") {
-      active.abort.abort();
-      showPending(target, false);
-    }
-    if (active && policy === "queue") {
-      const base = queues.get(target) || active.done;
-      let queued;
-      const next = base.then(() => send(el, eventName, source));
-      queued = next.catch(() => {}).finally(() => {
-        if (queues.get(target) === queued) queues.delete(target);
-      });
-      queues.set(target, queued);
-      return;
-    }
-
-    const abort = new AbortController();
-    const timeout = setTimeout(
-      () => abort.abort(new DOMException(`hemx request timed out after ${REQUEST_TIMEOUT_MS} ms`, "TimeoutError")),
-      REQUEST_TIMEOUT_MS,
-    );
-    activeRequests.add(abort);
-    let finish;
-    const done = new Promise((resolve) => { finish = resolve; });
-    const method = String((form && form.getAttribute("method")) || "POST").toUpperCase();
-    const mode = method === "GET" && form && pageFormHistoryMode(source, form);
-    const body = method === "GET" || method === "HEAD" ? undefined : requestBody(data, multipart);
-    const headers = { "X-HEMX-Partial": "1", "Accept": "application/hemx, text/html" };
-    if (body instanceof URLSearchParams) headers["Content-Type"] = "application/x-www-form-urlencoded;charset=UTF-8";
-    pending.set(target, { abort, done });
-    showError(target, null);
-    showPending(target, true);
+  async function send(el, eventName, source = el, capture) {
+    const owner = rootOf(el);
+    if (!dom.isConnected(el) || dom.ownerDocument(el) !== document || !owner) return;
     try {
-      if (mode) {
-        await navigateUrl(pageRequestUrl(form, source), rootOf(form) || rootOf(el), mode);
-        return;
+      if (dom.attr(el, "data-hemx-confirm") && !confirm(dom.attr(el, "data-hemx-confirm"))) return;
+      const target = formOwner(el) || el;
+      const policy = requestPolicy(target, eventName);
+      const active = pending.get(target);
+      const tail = queues.get(target);
+      if ((active || tail) && policy === "drop") return;
+      // Capture successful controls once, at submission, also for queued work.
+      const { form, data, submission } = formDataFor(el, eventName, source, capture);
+      const { action, method, enctype } = submission;
+      const mode = method === "GET" && form && (pageFormHistoryMode(source, form) || "push");
+      const body = method === "GET" || method === "HEAD" ? undefined : requestBody(data, enctype === "multipart/form-data");
+      const headers = { "X-HEMX-Partial": "1", "Accept": "application/hemx, text/html" };
+      if (body instanceof URLSearchParams) headers["Content-Type"] = "application/x-www-form-urlencoded;charset=UTF-8";
+      if (active && policy === "latest") {
+        active.abort.abort();
+        active.release();
       }
-      savePage(roots()[0]);
-      const response = await fetch(requestUrl(form, data, method), {
-        method,
-        body,
-        headers,
-        credentials: "same-origin",
-        signal: abort.signal,
-      });
-      if (pending.get(target)?.abort !== abort && policy === "latest") return;
-      if (!response.ok) throw httpError(response);
-      await applyResponse(response, rootOf(target));
+
+      const execute = async () => {
+        if (!dom.isConnected(el) || dom.ownerDocument(el) !== document || rootOf(el) !== owner) return;
+        const abort = new AbortController();
+        const timeout = setTimeout(
+          () => abort.abort(new DOMException(`hemx request timed out after ${REQUEST_TIMEOUT_MS} ms`, "TimeoutError")),
+          REQUEST_TIMEOUT_MS,
+        );
+        activeRequests.add(abort);
+        let finish;
+        const done = new Promise((resolve) => { finish = resolve; });
+        const release = beginPending(target, owner);
+        pending.set(target, { abort, done, release });
+        showError(target, null, owner);
+        try {
+          if (mode) {
+            await navigateUrl(requestUrl(action, data, method), owner, mode, release, abort.signal);
+            return;
+          }
+          const response = await fetch(requestUrl(action, data, method), {
+            method, body, headers, credentials: "same-origin", signal: abort.signal,
+          });
+          if ((pending.get(target)?.abort !== abort && policy === "latest") ||
+              !dom.isConnected(owner) || dom.ownerDocument(owner) !== document || !dom.has(owner, ROOT)) {
+            discard(response);
+            return;
+          }
+          requireUsable(response, owner);
+          if (!await applyResponse(response, owner, release)) throw new Error("hemx response has no applicable content");
+        } finally {
+          clearTimeout(timeout);
+          activeRequests.delete(abort);
+          if (pending.get(target)?.abort === abort) pending.delete(target);
+          release();
+          finish();
+        }
+      };
+      if ((active || tail) && policy === "queue") {
+        const base = tail || active.done;
+        let queued;
+        queued = base.then(execute, execute).finally(() => {
+          if (queues.get(target) === queued) queues.delete(target);
+        });
+        queues.set(target, queued);
+        await queued;
+      } else await execute();
     } catch (error) {
       if (error.name !== "AbortError") {
-        showError(target, error);
-        emit(rootOf(target), "hemx:error", { message: String(error), status: error.status || null });
+        showError(el, error, owner);
+        if (!error.hemxReported) emit(owner, "hemx:error", { message: String(error), status: error.status || null });
       }
-    } finally {
-      clearTimeout(timeout);
-      activeRequests.delete(abort);
-      if (pending.get(target)?.abort === abort) {
-        pending.delete(target);
-        showPending(target, false);
-      } else if (policy === "parallel") {
-        showPending(target, false);
-      }
-      finish();
     }
   }
 
   async function navigate(anchor, mode = "push") {
     const href = anchor.href;
     const root = rootOf(anchor);
-    showPending(anchor, true);
+    const release = beginPending(anchor, root);
     try {
-      await navigateUrl(href, root, mode);
+      await navigateUrl(href, root, mode, release);
     } finally {
-      showPending(anchor, false);
+      release();
     }
   }
 
-  function snapshotPage(root) {
-    return root ? {
-      hemx: true,
-      pageHtml: root.innerHTML,
-      pageTitle: document.title,
-      scrollX: window.scrollX,
-      scrollY: window.scrollY,
-    } : null;
-  }
-
-  function savePage(root) {
-    const snapshot = snapshotPage(root);
-    if (snapshot) history.replaceState(snapshot, "", location.href);
-  }
-
-  function restorePage(state, root) {
-    if (!root || !state || typeof state.pageHtml !== "string") return false;
-    root.innerHTML = state.pageHtml;
-    if (state.pageTitle) document.title = state.pageTitle;
-    bindRoot(root);
-    requestAnimationFrame(() => scrollTo(state.scrollX, state.scrollY));
-    return true;
-  }
-
-  async function navigateUrl(href, root, mode = "replace") {
-    if (mode === "push") savePage(root);
+  async function navigateUrl(href, root, mode = "replace", finishPending, signal) {
     try {
       const response = await fetch(href, {
         headers: { "X-HEMX-Partial": "1", "Accept": "text/html" },
-        credentials: "same-origin",
+        credentials: "same-origin", signal,
       });
-      if (!response.ok || !await applyResponse(response, root)) {
+      requireUsable(response, root);
+      const result = await applyResponse(response, root, finishPending);
+      if (result === "navigating") return true;
+      if (!result) {
         fallbackNavigation(href, mode);
-        return;
+        return true;
       }
       if (mode === "push") history.pushState({ hemx: true }, "", href);
       else if (mode === "replace") history.replaceState({ hemx: true }, "", href);
-    } catch (_) {
-      fallbackNavigation(href, mode);
+      return true;
+    } catch (error) {
+      if (error.name !== "AbortError") {
+        showError(root, error, root);
+        if (!error.hemxReported) emit(root, "hemx:error", { message: String(error), status: error.status || null });
+      }
+      return false;
     }
   }
 
@@ -377,238 +431,440 @@
     else location.href = href;
   }
 
-  async function applyResponse(response, root) {
+  async function readWireBody(response) {
+    if (Number(response.headers.get("content-length")) > MAX_WIRE_BYTES) {
+      await response.body?.cancel();
+      throw new Error(`hemx batch exceeds ${MAX_WIRE_BYTES} bytes`);
+    }
+    if (!response.body) return new ArrayBuffer(0);
+    const reader = response.body.getReader();
+    const chunks = [];
+    let length = 0;
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value.byteLength > MAX_WIRE_BYTES - length) {
+          await reader.cancel();
+          throw new Error(`hemx batch exceeds ${MAX_WIRE_BYTES} bytes`);
+        }
+        length += value.byteLength;
+        chunks.push(value);
+      }
+    } finally { reader.releaseLock(); }
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return bytes.buffer;
+  }
+
+  async function applyResponse(response, root, finishPending) {
+    if (response.status === 204) { finishPending?.(); return true; }
     if (response.redirected) {
+      discard(response);
+      finishPending?.();
       location.href = response.url;
-      return false;
+      return "navigating";
     }
     if (!compatibleFingerprint(response, root)) {
-      location.reload();
-      return false;
+      discard(response);
+      throw staleError();
     }
     const type = response.headers.get("content-type") || "";
-    if (type.includes("text/html")) return applyHtml(await response.text(), root, response.headers.get("x-hemx-title"));
+    if (type.includes("text/html")) {
+      const html = await response.text();
+      finishPending?.();
+      return updateHtml(html, root, response.headers.get("x-hemx-title"));
+    }
     if (type.includes("application/hemx")) {
-      applyBatch(await response.arrayBuffer(), root);
+      const bytes = await readWireBody(response);
+      finishPending?.();
+      // A batch that found its rows drifted is being healed by a refetch; the
+      // request itself succeeded.
+      if (!applyBatch(bytes, root) && drifted.get(root || document) !== "healing") {
+        const error = new Error("hemx effect application failed");
+        error.hemxReported = true;
+        throw error;
+      }
       return true;
     }
+    discard(response);
+    finishPending?.();
     return false;
   }
 
   function compatibleFingerprint(response, root) {
     const received = response.headers.get("x-hemx-fingerprint");
-    const expected = root && root.getAttribute(BUILD);
+    const expected = root && dom.attr(root, BUILD);
     return !received || !expected || received === expected;
   }
 
   function applyBatch(buffer, root) {
-    let batch;
-    try {
-      batch = decodeBatch(buffer);
-    } catch (error) {
-      if (error?.code === "HEMX_UNSUPPORTED_ABI") {
-        location.reload();
-        return;
-      }
-      throw error;
-    }
-    const expected = root && root.getAttribute(BUILD);
-    if (expected && String(batch.fingerprint) !== expected) {
-      location.reload();
-      return;
-    }
     const scope = root || document;
-    for (const op of batch.ops) {
-      if (!applyOp(scope, op)) return;
+    try {
+      return applyDecoded(decodeBatch(buffer), root);
+    } catch (error) {
+      emit(scope, "hemx:error", { message: String(error), code: error.code || null });
+      return false;
     }
-    bindPolling(scope);
-    bindRevealed(scope);
   }
 
-  function positionTarget(scope, position) {
-    if (position.kind === "before" || position.kind === "after") return targetFor(scope, position.target);
-    return null;
+  // Decoding has already checked every declaration's structure ();
+  // effects then apply in order and stop at the first failure.
+  function applyDecoded(batch, root) {
+    const scope = root || document;
+    try {
+      const expected = root && dom.attr(root, BUILD);
+      if (expected && String(batch.fingerprint) !== expected) throw staleError();
+      for (const op of batch.ops) {
+        if (!applyOp(scope, op)) return false;
+      }
+      roots().forEach(bindEnhancedRoot);
+      return true;
+    } catch (error) {
+      if (error.code === DRIFT) recoverDrift(scope, root, error);
+      else emit(scope, "hemx:error", { message: String(error), code: error.code || null });
+      return false;
+    }
   }
 
-  function applyOp(scope, op) {
-    if (op.kind === "patch") {
-      const target = targetFor(scope, op.target);
-      if (!target) return missing(scope, op.target);
-      if (op.mode === "replace") {
-        const nodes = fragmentNodes({ kind: "html", value: op.html }, null, null);
-        preserveIslands(target, nodes);
-        target.replaceWith(...nodes);
-      } else morphChildren(target, op.html);
-    } else if (op.kind === "insert") {
-      const target = targetFor(scope, op.target);
-      if (!target) return missing(scope, op.target);
-      if (op.position === "first") target.prepend(...fragmentNodes({ kind: "html", value: op.html }, null, null));
-      else if (op.position === "last") target.append(...fragmentNodes({ kind: "html", value: op.html }, null, null));
-      else {
-        const anchor = positionTarget(scope, op.position);
-        if (!anchor) return missing(scope, op.position.target);
-        const nodes = fragmentNodes({ kind: "html", value: op.html }, null, null);
-        for (const node of nodes) anchor.parentNode.insertBefore(node, op.position.kind === "before" ? anchor : anchor.nextSibling);
-      }
-    } else if (op.kind === "remove") {
-      const target = targetFor(scope, op.target);
-      if (!target) return missing(scope, op.target);
-      target.remove();
-    } else if (op.kind === "move") {
-      const target = targetFor(scope, op.target);
-      if (!target) return missing(scope, op.target);
-      if (op.position === "first") target.parentNode.prepend(target);
-      else if (op.position === "last") target.parentNode.append(target);
-      else {
-        const anchor = positionTarget(scope, op.position);
-        if (!anchor) return missing(scope, op.position.target);
-        anchor.parentNode.insertBefore(target, op.position.kind === "before" ? anchor : anchor.nextSibling);
-      }
-    } else if (op.kind === "focus") {
-      const target = targetFor(scope, op.target);
-      if (target && target.focus) target.focus({ preventScroll: op.preventScroll });
-      else return missing(scope, op.target);
-    } else if (op.kind === "scroll") {
-      const target = targetFor(scope, op.target);
-      if (!target) return missing(scope, op.target);
-      target.scrollIntoView({ block: op.block, behavior: op.behavior });
-    } else if (op.kind === "visit") {
-      navigateUrl(op.url, scope, op.history).catch(() => { location.href = op.url; });
-    } else if (op.kind === "dispatch") {
-      emit(scope, op.event, op.payload);
+  function isInputControl(el) {
+    return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement;
+  }
+
+  function isDisableControl(el) {
+    return isInputControl(el) || el instanceof HTMLButtonElement;
+  }
+
+
+  function clearField(scope, ref) {
+    const controls = fieldTargets(scope, ref);
+    if (!controls.length) return missing(scope, ref);
+    if (controls.some((control) => !isInputControl(control))) throw new Error("hemx clearing requires native form controls");
+    if (controls.some((control) => control instanceof HTMLSelectElement &&
+        Array.from(control.options).some((option) => rootOf(option) !== rootOf(control)))) {
+      throw new Error("hemx cannot clear selections owned by another root or island");
+    }
+    for (const control of controls) {
+      if (control instanceof HTMLSelectElement) {
+        for (const option of control.options) option.selected = false;
+        control.selectedIndex = -1;
+      } else if (control instanceof HTMLInputElement && (control.type === "checkbox" || control.type === "radio")) {
+        control.checked = false;
+      } else control.value = "";
     }
     return true;
   }
 
-  function targetFor(scope, ref) {
-    if (ref.scope && ref.scope.kind === "key") return keyedTarget(scope, ref.resource.id, ref.scope.value);
-    if (ref.scope && ref.scope.kind === "field") return fieldTarget(scope, ref.resource.id, ref.scope.value);
-    return generatedTarget(scope, ref.resource.id);
-  }
-
-  function firstElement(scope, predicate) {
-    const stack = [];
-    for (let node = scope && scope.firstElementChild; node; node = node.nextElementSibling) stack.push(node);
-    while (stack.length) {
-      const node = stack.shift();
-      if (node.hasAttribute && (node.hasAttribute(ROOT) || node.hasAttribute(ISLAND))) continue;
-      if (predicate(node)) return node;
-      for (let child = node.firstElementChild; child; child = child.nextElementSibling) stack.push(child);
+  // A collection row is exactly one element of the current root, stamped with
+  // its key. Insertion and replacement share this shape (, ).
+  function rowElement(nodes, ref, key, [action, adjective]) {
+    const elements = nodes.filter(dom.element);
+    if (elements.length !== 1 || nodes.some((node) => !dom.element(node) &&
+        dom.nodeType(node) !== 8 && (dom.nodeType(node) !== 3 || dom.textContent(node).trim() !== ""))) {
+      throw new Error(`hemx keyed ${action} requires one element`);
     }
-    return null;
-  }
-
-  function attrEquals(el, name, value) {
-    return el && el.getAttribute && el.getAttribute(name) === String(value);
-  }
-
-  function generatedResource(el, id) {
-    return attrEquals(el, RESOURCE, id);
-  }
-
-  function generatedForm(el, id) {
-    return generatedResource(el, id);
-  }
-
-  function generatedTarget(scope, id) {
-    if (scope && generatedResource(scope, id)) return scope;
-    return firstElement(scope, (el) => generatedResource(el, id));
-  }
-
-  function withinGeneratedResource(el, scope, id) {
-    for (let node = el; node && node !== scope.parentNode; node = node.parentElement) {
-      if (generatedResource(node, id)) return true;
-      if (node === scope) break;
+    const row = elements[0];
+    if (dom.has(row, ROOT) || dom.has(row, ISLAND)) throw new Error(`hemx ${adjective} row must belong to the current root`);
+    const declared = dom.attr(row, KEY);
+    if (declared !== null && declared !== key) throw new Error(`hemx ${adjective} key conflicts with rendered key`);
+    if (attrEquals(row, RESOURCE, ref.resource.id) && !dom.has(row, COLLECTION)) {
+      throw new Error(`hemx ${adjective} row shadows its collection resource`);
     }
-    return false;
+    dom.setAttribute(row, KEY, key);
+    return row;
   }
 
-  function withinGeneratedForm(el, scope, id) {
-    for (let node = el; node && node !== scope.parentNode; node = node.parentElement) {
-      if (generatedForm(node, id)) return true;
-      if (node === scope) break;
+  // Without moveBefore a row can still be reinserted, unless that would lose
+  // browser state it holds (); then nothing changes.
+  function stateError(key) {
+    return new Error(`hemx row ${key} holds focus, a selection, a frame, media or an open dialog and cannot move without native moveBefore`);
+  }
+
+  // Indices of a longest strictly increasing subsequence: those rows already
+  // stand in the declared relative order and need not move.
+  function stableIndices(values) {
+    const tails = [], previous = new Array(values.length);
+    for (let i = 0; i < values.length; i++) {
+      let low = 0, high = tails.length;
+      while (low < high) {
+        const middle = (low + high) >> 1;
+        if (values[tails[middle]] < values[i]) low = middle + 1; else high = middle;
+      }
+      previous[i] = low > 0 ? tails[low - 1] : -1;
+      tails[low] = i;
     }
-    return false;
+    const stable = new Set();
+    for (let i = tails.length ? tails[tails.length - 1] : -1; i !== -1; i = previous[i]) stable.add(i);
+    return stable;
   }
 
-  function isInputControl(el) {
-    return el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT");
-  }
+  // A collection holds exactly the declared keys in the declared order. Every
+  // check runs before the first DOM change; retained rows keep their identity
+  // and state, and only rows outside the stable order move natively.
 
-  function isDisableControl(el) {
-    return isInputControl(el) || (el && el.tagName === "BUTTON");
-  }
-
-  function keyedTarget(scope, id, key) {
-    return firstElement(scope, (el) => attrEquals(el, "data-hemx-key", key) && withinGeneratedResource(el, scope, id));
-  }
-
-  function fieldTarget(scope, id, field) {
-    return firstElement(scope, (el) => attrEquals(el, "name", field) && withinGeneratedForm(el, scope, id));
-  }
-
-  function formErrorTarget(scope, id, field) {
-    return firstElement(scope, (el) => attrEquals(el, "data-hemx-error-for", field) && withinGeneratedForm(el, scope, id)) ||
-      firstElement(scope, (el) => attrEquals(el, "name", field) && withinGeneratedForm(el, scope, id));
-  }
-
-  function putFormError(target, message) {
-    if (isInputControl(target)) target.setCustomValidity(message);
-    else target.textContent = message;
-  }
-
-  function putPayload(target, payload) {
-    if (payload.kind === "html") target.innerHTML = payload.value;
-    else if (isInputControl(target)) target.value = payload.value;
-    else target.textContent = payload.value;
-  }
-
-  function morphChildren(target, html) {
-    const nodes = fragmentNodes({ kind: "html", value: html }, null, null);
-    preserveIslands(target, nodes);
-    target.replaceChildren(...nodes);
-  }
-
-  function preserveIslands(current, incomingNodes) {
-    const islands = new Map();
-    islandElements(current).forEach((island) => islands.set(island.getAttribute(ISLAND), island));
-    for (const node of incomingNodes) {
-      islandElements(node).forEach((island) => {
-        const preserved = islands.get(island.getAttribute(ISLAND));
-        if (preserved) island.replaceWith(preserved);
-      });
+  function applyRows(scope, op) {
+    const container = collectionTarget(scope, op.target);
+    if (!container) return missing(scope, op.target);
+    const live = new Map();
+    for (const child of dom.children(container)) {
+      const key = dom.attr(child, KEY);
+      if (key === null) throw new Error("hemx collection children must all be keyed rows");
+      if (live.has(key)) throw new Error(`hemx ambiguous row ${key}`);
+      live.set(key, child);
     }
+    const supplied = new Map(op.rows.map(([key, html]) =>
+      [key, rowElement(morphing.parse(container, html), op.target, key, ["row", "declared"])]));
+    for (const key of op.order) {
+      if (!live.has(key) && !supplied.has(key)) throw new Error(`hemx row ${key} has no element`);
+    }
+    const currentIndex = new Map(Array.from(live.keys(), (key, index) => [key, index]));
+    const retained = op.order.filter((key) => live.has(key));
+    const stable = stableIndices(retained.map((key) => currentIndex.get(key)));
+    const moved = new Set(retained.filter((_, index) => !stable.has(index)));
+    for (const key of moved) {
+      if (!dom.canRelocate(container, live.get(key)) ||
+          (supplied.has(key) && !dom.canRelocate(container, supplied.get(key)))) throw stateError(key);
+    }
+    // Every reconciliation is checked before the first one runs ().
+    for (const [key, row] of supplied) if (live.has(key)) morphing.checkElement(live.get(key), row);
+    // Commit: changed rows reconcile in place, absent rows go, then placement. A
+    // row whose tag changed is a new element: placement must use that one.
+    for (const [key, row] of supplied) if (live.has(key)) {
+      forgetSubtreeOrders(live.get(key));
+      live.set(key, morphing.morphElement(live.get(key), row));
+    }
+    for (const [key, row] of live) if (!op.order.includes(key)) dom.remove(row);
+    let reference = null;
+    for (let i = op.order.length - 1; i >= 0; i--) {
+      const key = op.order[i];
+      const node = live.get(key) || supplied.get(key);
+      if (!live.has(key)) dom.insertBefore(container, node, reference);
+      else if (moved.has(key)) morphing.move(container, node, reference);
+      reference = node;
+    }
+    orderHashes.delete(container);
+    return true;
   }
 
-  function islandElements(root) {
-    const islands = [];
-    const queue = [root];
-    while (queue.length) {
-      const node = queue.shift();
-      if (node.nodeType === 1 && node.hasAttribute(ISLAND)) {
-        islands.push(node);
+  // The order hash names a collection's key order (): FNV-1a 64 over
+  // each key's UTF-8 bytes followed by 0xFF, exactly as hemx_core::order_hash.
+  // Computed in 32-bit halves; the prime is 2^40 + 0x1b3.
+  const utf8 = new TextEncoder();
+
+  function orderHash(keys) {
+    let hi = 0xcbf29ce4, lo = 0x84222325;
+    const mix = (byte) => {
+      lo = (lo ^ byte) >>> 0;
+      const low = lo * 0x1b3;
+      hi = (hi * 0x1b3 + ((lo << 8) >>> 0) + Math.floor(low / 0x100000000)) >>> 0;
+      lo = low >>> 0;
+    };
+    for (const key of keys) {
+      for (const byte of utf8.encode(key)) mix(byte);
+      mix(0xff);
+    }
+    return (BigInt(hi) << 32n) | BigInt(lo);
+  }
+
+  // A collection's current order hash, computed from its rows once and then
+  // carried forward by each applied delta. Anything else that may change the
+  // rows (a Patch around them, a full Rows declaration, a page swap) forgets it.
+  let orderHashes = new WeakMap();
+  function currentOrder(container) {
+    if (orderHashes.has(container)) return orderHashes.get(container);
+    const keys = [];
+    const seen = new Set();
+    for (const child of dom.children(container)) {
+      const key = dom.attr(child, KEY);
+      if (key === null) throw new Error("hemx collection children must all be keyed rows");
+      if (seen.has(key)) throw new Error(`hemx ambiguous row ${key}`);
+      seen.add(key);
+      keys.push(key);
+    }
+    const hash = orderHash(keys);
+    orderHashes.set(container, hash);
+    return hash;
+  }
+  function forgetOrders(nodes) {
+    for (const node of nodes) if (node) orderHashes.delete(node);
+  }
+  // Reconciliation can retain a nested collection element while changing its
+  // children. Forget before changing it, not just the outer collection's hash.
+  function forgetSubtreeOrders(node) {
+    forgetOrders([node, ...dom.query(node, `[${COLLECTION}]`)]);
+  }
+
+  // A delta changes a collection from one named order to another ().
+  // At its `to` order it is a duplicate and is skipped; anywhere else but
+  // `from` the client missed something and nothing changes. Every step is
+  // checked against the live rows and supplied HTML first ().
+
+  function applyRowsDelta(scope, op) {
+    const container = collectionTarget(scope, op.target);
+    if (!container) return missing(scope, op.target);
+    const state = currentOrder(container);
+    if (state !== op.from) {
+      // Skipping a duplicate applies nothing, so it proves nothing about the page.
+      if (state === op.to) return true;
+      const error = new Error("hemx rows are not in the state this change starts from");
+      error.code = DRIFT;
+      throw error;
+    }
+    // A few steps look rows up natively; a delta with many steps indexes
+    // the rows once instead of searching them for every step.
+    const found = new Map();
+    const indexed = op.steps.length + op.rows.length > 16;
+    if (indexed) {
+      for (const child of dom.children(container)) {
+        const key = dom.attr(child, KEY);
+        if (found.has(key)) throw new Error(`hemx ambiguous row ${key}`);
+        found.set(key, child);
+      }
+    }
+    const liveRow = (key) => {
+      if (indexed) return found.get(key) || null;
+      if (!found.has(key)) {
+        const rows = dom.query(container, `:scope > ${dom.attrSelector(KEY, key)}`);
+        if (rows.length > 1) throw new Error(`hemx ambiguous row ${key}`);
+        found.set(key, rows[0] || null);
+      }
+      return found.get(key);
+    };
+    const html = new Map(op.rows);
+    const parsed = new Map();
+    const parse = (key) => rowElement(morphing.parse(container, html.get(key)), op.target, key, ["row", "declared"]);
+    for (const key of html.keys()) parsed.set(key, parse(key));
+    // Preflight on a model: which keys are live after each step.
+    const removed = new Set(), created = new Set(), everRemoved = new Set();
+    const alive = (key) => created.has(key) || (!removed.has(key) && liveRow(key) !== null);
+    const moving = new Set();
+    for (const step of op.steps) {
+      if (step.op === "remove") {
+        if (!alive(step.key)) throw new Error(`hemx row ${step.key} is not there to remove`);
+        removed.add(step.key);
+        created.delete(step.key);
+        everRemoved.add(step.key);
+      } else {
+        if (step.before !== null && (step.before === step.key || !alive(step.before))) {
+          throw new Error(`hemx row ${step.key} has no place before ${step.before}`);
+        }
+        if (alive(step.key)) {
+          if (!created.has(step.key)) moving.add(step.key);
+        } else if (html.has(step.key)) {
+          created.add(step.key);
+        } else {
+          throw new Error(`hemx row ${step.key} has no element`);
+        }
+      }
+    }
+    for (const key of moving) {
+      if (!dom.canRelocate(container, liveRow(key)) ||
+          (parsed.has(key) && !dom.canRelocate(container, parsed.get(key)))) throw stateError(key);
+    }
+    const reconciled = [...html.keys()].filter((key) => !everRemoved.has(key) && liveRow(key));
+    for (const key of reconciled) morphing.checkElement(liveRow(key), parsed.get(key));
+    // Commit: live rows that stay reconcile in place (a changed tag is a new
+    // element, which the steps must see), then the steps run.
+    for (const key of reconciled) {
+      forgetSubtreeOrders(liveRow(key));
+      found.set(key, morphing.morphElement(liveRow(key), parsed.get(key)));
+    }
+    const current = new Map();
+    const node = (key) => current.has(key) ? current.get(key) : liveRow(key);
+    const fresh = new Set();
+    for (const step of op.steps) {
+      if (step.op === "remove") {
+        dom.remove(node(step.key));
+        current.set(step.key, null);
         continue;
       }
-      for (let child = node.firstElementChild; child; child = child.nextElementSibling) queue.push(child);
+      const reference = step.before === null ? null : node(step.before);
+      let row = node(step.key);
+      if (row && !fresh.has(row)) {
+        morphing.move(container, row, reference);
+        continue;
+      }
+      if (!row) {
+        row = parsed.get(step.key);
+        if (!row || dom.parentNode(row)) row = parse(step.key);
+        fresh.add(row);
+        current.set(step.key, row);
+      }
+      dom.insertBefore(container, row, reference);
     }
-    return islands;
+    orderHashes.set(container, op.to);
+    drifted.delete(scope);
+    return true;
   }
 
-  function replacePayload(target, payload, key, resourceId) {
-    const nodes = fragmentNodes(payload, key, resourceId);
-    if (nodes.length) target.replaceWith(...nodes);
-    else target.innerHTML = "";
+  // A client that missed an update heals by fetching its page again, once
+  // (). If the next delta still finds another order before any delta
+  // applied, refetching will not help: report it instead of looping. Missing
+  // capabilities (moveBefore) are not drift and never refetch.
+  const DRIFT = "HEMX_ROWS_DRIFT";
+  const drifted = new WeakMap();
+
+  function recoverDrift(scope, root, error) {
+    const state = drifted.get(scope);
+    if (state === "healing") return;
+    if (state === "healed") {
+      emit(scope, "hemx:error", { message: `${error.message}; reload to continue`, code: DRIFT });
+      return;
+    }
+    drifted.set(scope, "healing");
+    emit(scope, "hemx:resync", null);
+    // A delta that applied while the refetch ran has already cleared the guard;
+    // the refetch finishing must not put it back.
+    navigateUrl(location.href, root, "none").finally(() => {
+      if (drifted.get(scope) === "healing") drifted.set(scope, "healed");
+    });
   }
 
-  function fragmentNodes(payload, key, resourceId) {
-    const template = document.createElement("template");
-    if (payload.kind === "html") template.innerHTML = payload.value;
-    else template.textContent = payload.value;
-    const nodes = Array.from(template.content.childNodes);
-    const firstElement = nodes.find((node) => node.nodeType === 1);
-    if (firstElement && key != null && !firstElement.hasAttribute("data-hemx-key")) firstElement.setAttribute("data-hemx-key", key);
-    if (firstElement && resourceId != null && !firstElement.hasAttribute("data-hemx-resource")) firstElement.setAttribute("data-hemx-resource", resourceId);
-    return nodes;
+  function applyOp(scope, op) {
+    if (op.kind === "patch") {
+      if (op.mode === "morph" && op.target.scope?.kind === "field") {
+        if (op.html !== "") throw new Error("hemx form-field HTML patches only support clearing");
+        return clearField(scope, op.target);
+      }
+      const target = targetFor(scope, op.target);
+      if (!target) return missing(scope, op.target);
+      // A Patch may change rows of collections inside it; replacing a row may
+      // change its collection's order. Reconciling a row keeps its key.
+      forgetSubtreeOrders(target);
+      if (op.mode === "replace") forgetOrders([dom.parentNode(target)]);
+      if (op.mode === "replace") {
+        const parent = dom.parentNode(target);
+        if (!parent) throw new Error("hemx replacement requires a parent");
+        const nodes = morphing.parse(parent, op.html);
+        dom.replaceWith(target, ...nodes);
+      } else if (op.target.scope?.kind === "key" && !attrEquals(target, RESOURCE, op.target.resource.id)) {
+        // A collection row is the keyed element itself: reconcile the rendered
+        // row with it, as a Rows declaration would create it, never nest it.
+
+        const nodes = morphing.parse(dom.parentNode(target), op.html);
+        morphing.morphElement(target, rowElement(nodes, op.target, op.target.scope.value, ["replacement", "replacement"]));
+      } else morphing.morph(target, op.html);
+    } else if (op.kind === "rows") {
+      return applyRows(scope, op);
+    } else if (op.kind === "rowsDelta") {
+      return applyRowsDelta(scope, op);
+    } else if (op.kind === "focus") {
+      const fields = op.target.scope?.kind === "field" ? fieldTargets(scope, op.target) : null;
+      const target = fields ? fields.find((field) => field instanceof HTMLInputElement && field.type === "radio" && field.checked && !field.disabled) ||
+        fields.find((field) => !field.disabled) || fields[0] : targetFor(scope, op.target);
+      if (!target) return missing(scope, op.target);
+      dom.focus(target, { preventScroll: op.preventScroll });
+    } else if (op.kind === "scroll") {
+      const target = targetFor(scope, op.target);
+      if (!target) return missing(scope, op.target);
+      dom.scrollIntoView(target, { block: op.block, behavior: op.behavior });
+    } else if (op.kind === "visit") {
+      navigateUrl(op.url, scope, op.history).catch((error) => emit(scope, "hemx:error", String(error)));
+    } else if (op.kind === "dispatch") {
+      emit(scope, op.event, op.payload);
+    }
+    return true;
   }
 
   function missing(root, target) {
@@ -616,78 +872,111 @@
     return false;
   }
 
-  function cssEscape(value) {
-    return String(value).replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
-  }
-
   function applyHtml(html, root, title) {
-    const scope = root || document;
-    const doc = new DOMParser().parseFromString(html, "text/html");
-    const template = firstElement(doc, (el) => el.tagName === "TEMPLATE" && el.hasAttribute("data-hemx"));
-    const lowered = replaceLoweredSlots(scope, doc);
-    const named = replaceSlot(scope, doc, "content", lowered ? undefined : (template ? template.innerHTML : html));
-    if (!lowered && !named) {
-      emit(scope, "hemx:missing-content-slot", null);
+    try {
+      const applied = updateHtml(html, root, title);
+      if (!applied) emit(root, "hemx:missing-content-slot", null);
+      return applied;
+    } catch (error) {
+      emit(root, "hemx:error", { message: String(error) });
       return false;
     }
-    replaceSlot(scope, doc, "nav");
-    const titleEl = firstElement(doc, (el) => el.tagName === "TITLE");
-    const nextTitle = title || (titleEl && titleEl.textContent);
+  }
+
+  function sourceScope(doc, scope) {
+    // A fragment with an outer slot already identifies its update boundary.
+    if (elements(doc.body, (node) => dom.has(node, RESOURCE) || namedSlot(node, "content")).length) return doc.body;
+    const incoming = [];
+    forEachElement(doc, (node) => { if (dom.has(node, ROOT)) incoming.push(node); });
+    if (!incoming.length) return doc.body;
+    const id = dom.attr(scope, "id");
+    if (id) return unique(incoming.filter((node) => attrEquals(node, "id", id)), `HTML root ${id}`);
+    const name = dom.attr(scope, ROOT);
+    if (name === null) return null;
+    const parentRoot = closestRootAncestor(scope);
+    if (parentRoot && incoming.length > 1) throw new Error("hemx nested HTML root requires an unambiguous identity");
+    const top = incoming.filter((node) => !closestRootAncestor(node));
+    return unique(top.filter((node) => dom.attr(node, ROOT) === name), "HTML root");
+  }
+
+  function closestRootAncestor(node) {
+    for (let parent = dom.parentElement(node); parent; parent = dom.parentElement(parent)) {
+      if (dom.has(parent, ROOT)) return parent;
+    }
+    return null;
+  }
+
+
+  function updateHtml(html, root, title) {
+    const scope = root || document;
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const source = sourceScope(doc, scope);
+    if (!source) return false;
+    const template = firstElement(source, (node) => node instanceof HTMLTemplateElement && dom.has(node, "data-hemx"));
+    orderHashes = new WeakMap();
+    const lowered = replaceLoweredSlots(scope, source);
+    const named = !lowered && replaceSlot(scope, source, "content", template ? dom.innerHTML(template) : html);
+    if (!lowered && !named) return false;
+    if (!lowered) replaceSlot(scope, source, "nav");
+    const nextTitle = title || doc.title;
     if (nextTitle) document.title = nextTitle;
+    roots().forEach(bindEnhancedRoot);
     return true;
   }
 
-  function replaceLoweredSlots(scope, doc) {
-    let changed = false;
-    forEachElement(doc.body || doc, (source) => {
-      const id = source.getAttribute(RESOURCE);
-      if (!id) return;
-      const target = generatedTarget(scope, id);
-      if (target) {
-        target.innerHTML = source.innerHTML;
-        changed = true;
+  function replaceLoweredSlots(scope, sourceScope) {
+    const plans = [];
+    let missingTarget = false;
+    forEachOwned(sourceScope, (source) => {
+      const id = dom.attr(source, RESOURCE);
+      if (id === null) return;
+      if (source !== sourceScope) {
+        for (let parent = dom.parentElement(source); parent; parent = dom.parentElement(parent)) {
+          if (dom.has(parent, RESOURCE)) return;
+          if (parent === sourceScope) break;
+        }
       }
+      if (!/^\d+$/.test(id) || Number(id) > 0xffffffff || String(Number(id)) !== id) throw new Error("hemx invalid resource marker in HTML response");
+      const key = nearestKey(source, sourceScope);
+      const ref = { resource: { kind: "slot", id: Number(id) }, scope: key === null ? null : { kind: "key", value: key } };
+      const target = dom.has(source, COLLECTION) ? collectionTarget(scope, ref) : targetFor(scope, ref);
+      if (!target) { missingTarget = true; return; }
+      if (plans.some((plan) => dom.contains(plan.target, target) || dom.contains(target, plan.target))) {
+        throw new Error("hemx overlapping HTML slot updates require an enclosing resource");
+      }
+      plans.push({ target, source });
     });
-    return changed;
-  }
-
-  function forEachElement(scope, visit) {
-    for (let node = scope && scope.firstElementChild; node; node = node.nextElementSibling) {
-      visit(node);
-      forEachElement(node, visit);
-    }
-  }
-
-  function generatedFormTarget(scope, id) {
-    if (scope && generatedForm(scope, id)) return scope;
-    return firstElement(scope, (el) => generatedForm(el, id));
+    if (missingTarget) return false;
+    for (const plan of plans) morphing.morphElement(plan.target, plan.source);
+    return plans.length > 0;
   }
 
   function namedSlot(el, name) {
     return attrEquals(el, "data-hemx-slot", name) || attrEquals(el, "data-slot", name);
   }
 
-  function replaceSlot(scope, doc, name, fallback) {
-    const target = firstElement(scope, (el) => namedSlot(el, name));
+  function replaceSlot(scope, sourceScope, name, fallback) {
+    const target = unique(elements(scope, (node) => namedSlot(node, name)), `named slot ${name}`);
     if (!target) return false;
-    const source = firstElement(doc, (el) => namedSlot(el, name));
-    if (!source && fallback === undefined) return false;
-    target.innerHTML = source ? source.innerHTML : fallback;
+    const source = unique(elements(sourceScope, (node) => namedSlot(node, name)), `source named slot ${name}`);
+    if (source) morphing.morphElement(target, source);
+    else if (fallback !== undefined) morphing.morph(target, fallback);
+    else return false;
     return true;
   }
 
   function emit(root, name, detail) {
-    (root || document).dispatchEvent(new CustomEvent(name, { bubbles: true, detail }));
+    dom.dispatch(root || document, new CustomEvent(name, { bubbles: true, detail }));
   }
 
   function defaultEvent(el) {
-    if (el.getAttribute("data-hemx-on")) return el.getAttribute("data-hemx-on").trim().split(/\s+/)[0];
-    if (el.tagName === "FORM") return "submit";
+    if (dom.attr(el, "data-hemx-on")) return dom.attr(el, "data-hemx-on").trim().split(/\s+/)[0];
+    if (el instanceof HTMLFormElement) return "submit";
     return "click";
   }
 
   function handlesEvent(el, name) {
-    const declared = el.getAttribute("data-hemx-on");
+    const declared = dom.attr(el, "data-hemx-on");
     return declared ? declared.trim().split(/\s+/).includes(name) : defaultEvent(el) === name;
   }
 
@@ -695,24 +984,25 @@
     if (boundRoots.has(root)) return;
     boundRoots.add(root);
     ["click", "submit", "input", "change", "keydown", "dragstart", "dragover", "drop"].forEach((name) => {
-      root.addEventListener(name, (event) => {
-        if (rootOf(event.target) !== root) return;
+      if (name === "submit") return; // Native submission admission is owned by forms.js.
+      dom.on(root, name, (event) => {
+        if (!dom.isConnected(root) || dom.ownerDocument(root) !== document || event.defaultPrevented || rootOf(event.target) !== root) return;
         if (name === "dragstart") {
-          const item = closestInRoot(event.target, root, (el) => el.hasAttribute("data-hemx-key"));
+          const item = closestInRoot(event.target, root, (el) => dom.has(el, "data-hemx-key"));
           if (item) {
-            dragKeys.set(root, item.getAttribute("data-hemx-key"));
-            if (event.dataTransfer) event.dataTransfer.setData("text/plain", item.getAttribute("data-hemx-key"));
+            dragKeys.set(root, dom.attr(item, "data-hemx-key"));
+            if (event.dataTransfer) event.dataTransfer.setData("text/plain", dom.attr(item, "data-hemx-key"));
           }
           return;
         }
         if (name === "dragover") {
-          const drop = closestInRoot(event.target, root, (el) => el.hasAttribute(ACTION) && el.getAttribute("data-hemx-on") === "drop");
+          const drop = closestInRoot(event.target, root, (el) => dom.has(el, ACTION) && dom.attr(el, "data-hemx-on") === "drop");
           if (drop) event.preventDefault();
           return;
         }
         const nav = closestInRoot(event.target, root, (el) =>
-          (el.tagName === "A" && el.hasAttribute("data-hemx-nav")) ||
-          (el.tagName === "A" && el.hasAttribute("href") && closestInRoot(el.parentElement, root, (node) => node.hasAttribute("data-hemx-boost")))
+          (el instanceof HTMLAnchorElement && dom.has(el, "data-hemx-nav")) ||
+          (el instanceof HTMLAnchorElement && dom.has(el, "href") && closestInRoot(dom.parentElement(el), root, (node) => dom.has(node, "data-hemx-boost")))
         );
         if (name === "click" && nav && sameOriginNav(event, nav)) {
           event.preventDefault();
@@ -720,166 +1010,194 @@
           return;
         }
         if (name === "click") {
-          const direct = closestInRoot(event.target, root, (el) => el.hasAttribute(ACTION));
+          const submitter = closestInRoot(event.target, root, isSubmitter);
+          if (submitter && submitter.form) return;
+          const direct = closestInRoot(event.target, root, (el) => dom.has(el, ACTION));
           if (direct && handlesEvent(direct, "click")) {
-            event.preventDefault();
+            if (direct instanceof HTMLAnchorElement && dom.has(direct, "href")) event.preventDefault();
             schedule(direct, name);
             return;
           }
         }
-        if (name === "click") {
-          const submitter = closestInRoot(event.target, root, (el) =>
-            (el.tagName === "BUTTON" && (!el.hasAttribute("type") || el.getAttribute("type") === "submit")) ||
-            (el.tagName === "INPUT" && el.getAttribute("type") === "submit")
-          );
-          const form = formOwner(submitter);
-          if (form && root.contains(form) && (formHandleId(form) || pageFormHistoryMode(submitter, form))) {
-            if (form.reportValidity && !form.reportValidity()) return;
-            event.preventDefault();
-            schedule(form, "submit", submitter);
-            return;
-          }
-        }
         let el = closestInRoot(event.target, root, (node) =>
-          node.hasAttribute(ACTION) ||
-          (node.tagName === "FORM" && (pageFormHistoryMode(event.submitter || node, node) || boostRoot(node)))
+          dom.has(node, ACTION) ||
+          (node instanceof HTMLFormElement && (pageFormHistoryMode(event.submitter || node, node) || boostRoot(node)))
         );
-        if (name === "submit" && !el && event.target && event.target.tagName === "FORM" && (formHandleId(event.target) || pageFormHistoryMode(event.submitter || event.target, event.target))) el = event.target;
         if (!el || !handlesEvent(el, name)) return;
-        event.preventDefault();
+        if (name === "drop") event.preventDefault();
         schedule(el, name, event.submitter || el);
       });
     });
   }
 
-  function schedule(el, eventName, source = el) {
-    const debounce = duration(el.getAttribute("data-hemx-debounce"));
-    const throttle = duration(el.getAttribute("data-hemx-throttle"));
-    if (debounce) {
-      clearTimeout(timers.get(el));
-      timers.set(el, setTimeout(() => send(el, eventName, source), debounce));
-    } else if (throttle) {
-      if (timers.get(el)) return;
-      send(el, eventName, source).finally(() => setTimeout(() => timers.delete(el), throttle));
-    } else {
-      send(el, eventName, source);
+  function schedule(el, eventName, source = el, capture) {
+    const owner = rootOf(el);
+    if (!owner || !dom.isConnected(el) || dom.ownerDocument(el) !== document) return;
+    try {
+      const debounce = duration(dom.attr(el, "data-hemx-debounce"));
+      const throttle = duration(dom.attr(el, "data-hemx-throttle"));
+      if (timers.has(el) && timers.get(el).owner !== owner) cancelScheduled(el);
+      if (debounce) {
+        cancelScheduled(el);
+        const id = setTimeout(() => {
+          timers.delete(el);
+          if (rootOf(el) === owner) send(el, eventName, source, capture);
+        }, debounce);
+        timers.set(el, { id, owner });
+      } else if (throttle) {
+        if (timers.has(el)) return;
+        const id = setTimeout(() => timers.delete(el), throttle);
+        timers.set(el, { id, owner });
+        send(el, eventName, source, capture);
+      } else send(el, eventName, source, capture);
+    } catch (error) {
+      emit(owner, "hemx:error", { message: String(error) });
     }
   }
 
+  function cancelScheduled(el) {
+    clearTimeout(timers.get(el)?.id);
+    timers.delete(el);
+  }
+
+  // Removed attributes and moved nodes are handled by the mutation observer;
+  // scanning only current declarations keeps rebinding proportional to them.
   function bindPolling(root) {
-    forEachElement(root, (el) => {
-      if (rootOf(el) !== root) return;
-      if ((!el.hasAttribute("data-hemx-every") && !el.hasAttribute("data-hemx-interval")) || everyTimers.has(el)) return;
-      const eventName = el.hasAttribute("data-hemx-interval") ? "interval" : "every";
-      const ms = duration(el.getAttribute("data-hemx-interval") || el.getAttribute("data-hemx-every"));
+    select(root, "[data-hemx-every],[data-hemx-interval]").forEach((el) => {
+      const eventName = dom.has(el, "data-hemx-interval") ? "interval" : "every";
+      const setting = dom.attr(el, `data-hemx-${eventName}`);
+      const previous = everyTimers.get(el);
+      if (previous && (previous.owner !== root || previous.setting !== setting || previous.eventName !== eventName)) stopPolling(el);
+      if (setting === null || everyTimers.has(el)) return;
+      const ms = duration(setting);
       if (!ms) return;
-      everyTimers.set(el, setInterval(() => document.contains(el) ? send(el, eventName) : stopPolling(el), ms));
+      const id = setInterval(() => {
+        if (!dom.isConnected(el) || dom.ownerDocument(el) !== document || rootOf(el) !== root || dom.attr(el, `data-hemx-${eventName}`) !== setting) stopPolling(el);
+        else schedule(el, eventName);
+      }, ms);
+      everyTimers.set(el, { id, owner: root, setting, eventName });
     });
   }
 
   function stopPolling(el) {
-    clearInterval(everyTimers.get(el));
+    clearInterval(everyTimers.get(el)?.id);
     everyTimers.delete(el);
   }
 
   function revealedRootMargin(el) {
-    const ahead = Number(el.getAttribute("data-hemx-revealed-ahead") || "0");
+    const ahead = Number(dom.attr(el, "data-hemx-revealed-ahead") || "0");
     const viewports = Number.isFinite(ahead) && ahead >= 0 ? ahead : 0;
     return `0px 0px ${viewports * window.innerHeight}px 0px`;
   }
 
+  function stopRevealed(el) {
+    const binding = revealBindings.get(el);
+    if (binding) binding.observer.unobserve(el);
+    revealBindings.delete(el);
+  }
+
   function bindRevealed(root) {
     let observers = revealObservers.get(root);
-    forEachElement(root, (el) => {
-      if (rootOf(el) !== root) return;
-      if (!el.hasAttribute("data-hemx-revealed") || revealed.has(el)) return;
-      if (typeof IntersectionObserver === "undefined") {
-        revealed.add(el);
-        schedule(el, "revealed");
+    select(root, "[data-hemx-revealed]").forEach((el) => {
+      if (revealed.get(el) === root) {
+        stopRevealed(el);
         return;
       }
+      if (typeof IntersectionObserver === "undefined") throw new Error("hemx revealed requires IntersectionObserver");
+      const rootMargin = revealedRootMargin(el);
+      const binding = revealBindings.get(el);
+      if (binding && binding.root === root && binding.rootMargin === rootMargin) return;
+      stopRevealed(el);
       if (!observers) {
         observers = new Map();
         revealObservers.set(root, observers);
       }
-      const rootMargin = revealedRootMargin(el);
       let observer = observers.get(rootMargin);
       if (!observer) {
         observer = new IntersectionObserver((entries) => {
           entries.forEach((entry) => {
-            if (!entry.isIntersecting || revealed.has(entry.target)) return;
-            revealed.add(entry.target);
-            observer.unobserve(entry.target);
-            schedule(entry.target, "revealed");
+            const node = entry.target;
+            if (revealBindings.get(node)?.observer !== observer) return;
+            if (!dom.isConnected(node) || dom.ownerDocument(node) !== document || rootOf(node) !== root || !dom.has(node, "data-hemx-revealed")) {
+              stopRevealed(node);
+              return;
+            }
+            if (!entry.isIntersecting || revealed.get(node) === root) return;
+            revealed.set(node, root);
+            stopRevealed(node);
+            schedule(node, "revealed");
           });
         }, { rootMargin });
         observers.set(rootMargin, observer);
       }
+      revealBindings.set(el, { root, rootMargin, observer });
       observer.observe(el);
     });
   }
 
+  function activeRoot(root) {
+    return dom.isConnected(root) && dom.ownerDocument(root) === document && dom.has(root, ROOT);
+  }
+
   function bindSse(root) {
-    const url = root.getAttribute("data-hemx-sse");
-    if (!url || sseSources.has(root) || typeof EventSource === "undefined") return;
-    const href = new URL(url, location.href);
-    if (href.origin !== location.origin) {
-      emit(root, "hemx:sse-error", url);
-      return;
+    const url = dom.attr(root, "data-hemx-sse");
+    const previous = sseSources.get(root);
+    let href;
+    try {
+      if (url) {
+        href = new URL(url, document.baseURI);
+        if (href.origin !== location.origin || !/^https?:$/.test(href.protocol) || href.username || href.password) throw new Error("invalid stream URL");
+        if (previous && previous.url === href.href) return;
+      }
+    } catch (_) {
+      sseSources.delete(root);
+      previous?.close();
+      throw new Error("hemx SSE requires a same-origin HTTP(S) URL without embedded credentials");
     }
+    sseSources.delete(root);
+    previous?.close();
+    if (!url) return;
+    if (typeof EventSource === "undefined") throw new Error("hemx SSE requires EventSource");
     const source = new EventSource(href.href);
-    source.addEventListener("hemx", (event) => applySseMessage(root, event));
-    source.addEventListener("message", (event) => applySseMessage(root, event));
-    source.addEventListener("error", () => emit(root, "hemx:sse-error", url));
+    const current = () => activeRoot(root) && sseSources.get(root) === source;
+    source.addEventListener("hemx", (event) => { if (current()) applySseMessage(root, event); });
+    source.addEventListener("message", (event) => { if (current()) applySseMessage(root, event); });
+    source.addEventListener("error", () => { if (current()) emit(root, "hemx:sse-error", "SSE connection failed"); });
     sseSources.set(root, source);
   }
 
+  // Drain once per frame, but preserve every operation and message boundary.
+  // Even Morph A -> B -> A differs from just A for a dirty input. A failed
+  // message stops its own effects, not the next independently received batch.
+
+  const sseInbox = new WeakMap();
   function applySseMessage(root, event) {
-    try {
-      const bytes = base64UrlBytes(event.data);
-      applyBatch(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), root);
-    } catch (error) {
-      emit(root, "hemx:error", String(error));
+    let inbox = sseInbox.get(root);
+    if (!inbox) {
+      inbox = [];
+      sseInbox.set(root, inbox);
+      const flush = () => {
+        sseInbox.delete(root);
+        if (!activeRoot(root)) return;
+        for (const batch of inbox) applyDecoded(batch, root);
+      };
+      // Hidden documents get no animation frames; drain their queue on a timer.
+      if (document.hidden || typeof requestAnimationFrame !== "function") setTimeout(flush, 100);
+      else requestAnimationFrame(flush);
     }
-  }
-
-  function bindWebSocket(root) {
-    const url = root.getAttribute("data-hemx-ws");
-    if (!url || webSockets.has(root) || typeof WebSocket === "undefined") return;
-    const href = new URL(url, location.href);
-    if (href.origin !== location.origin) {
-      const error = new Error("hemx WebSocket URL must be same-origin");
-      showError(root, error);
-      emit(root, "hemx:ws-error", url);
-      return;
-    }
-    href.protocol = href.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(href.href);
-    socket.binaryType = "arraybuffer";
-    socket.addEventListener("message", (event) => applyWebSocketMessage(root, event));
-    socket.addEventListener("error", () => {
-      showError(root, new Error("hemx WebSocket failed"));
-      emit(root, "hemx:ws-error", url);
-    });
-    webSockets.set(root, socket);
-  }
-
-  function applyWebSocketMessage(root, event) {
     try {
-      if (!(event.data instanceof ArrayBuffer)) throw new Error("hemx WebSocket messages must be binary");
-      applyBatch(event.data, root);
-      showError(root, null);
+      inbox.push(decodeBatch(base64UrlBytes(event.data).buffer));
     } catch (error) {
-      showError(root, error);
-      emit(root, "hemx:error", String(error));
+      emit(root, "hemx:error", { message: String(error), code: error.code || null });
     }
   }
 
   function duration(value) {
-    if (!value) return 0;
+    if (value === null || value === undefined) return 0;
     const match = String(value).trim().match(/^(\d+)(ms|s)?$/);
-    if (!match) return 0;
-    return Number(match[1]) * (match[2] === "s" ? 1000 : 1);
+    const ms = match ? Number(match[1]) * (match[2] === "s" ? 1000 : 1) : NaN;
+    if (!Number.isSafeInteger(ms) || ms < 0 || ms > 0x7fffffff) throw new Error("hemx duration must be an integer from 0 to 2147483647 milliseconds");
+    return ms;
   }
 
   function base64UrlBytes(encoded) {
@@ -893,6 +1211,7 @@
 
   const MAX_WIRE_BYTES = 1024 * 1024;
   const MAX_WIRE_ITEMS = 1024;
+  const MAX_ROW_KEYS = 65536;
   const MAX_WIRE_FIELD_BYTES = 256 * 1024;
 
   function boundedLength(value, maximum, field) {
@@ -924,7 +1243,7 @@
       const hi = BigInt(u32());
       return lo | (hi << 32n);
     };
-    const str = () => new TextDecoder("utf-8", { fatal: true }).decode(
+    const str = () => new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
       need(boundedLength(u32(), MAX_WIRE_FIELD_BYTES, "hemx string")),
     );
     const bytesField = () => need(boundedLength(u32(), MAX_WIRE_FIELD_BYTES, "hemx bytes"));
@@ -932,12 +1251,6 @@
       const discriminant = u8();
       if (discriminant >= values.length) throw new Error(`unknown ${field} ${discriminant}`);
       return values[discriminant];
-    };
-    const option = (read) => {
-      const discriminant = u8();
-      if (discriminant === 0) return null;
-      if (discriminant === 1) return read();
-      throw new Error(`unknown hemx option ${discriminant}`);
     };
     const resource = () => {
       const kind = u8();
@@ -954,24 +1267,53 @@
       throw new Error(`unknown hemx scope ${kind}`);
     };
     const ref = () => ({ resource: resource(), scope: scope() });
-    const position = () => {
-      const kind = u8();
-      if (kind === 0) return "first";
-      if (kind === 1) return "last";
-      if (kind === 2) return { kind: "before", target: ref() };
-      if (kind === 3) return { kind: "after", target: ref() };
-      throw new Error(`unknown hemx position ${kind}`);
+    // Same structural rules as the Rust codec (, ).
+    const rowsDeclaration = () => {
+      const target = ref();
+      const order = [];
+      const orderLength = boundedLength(u32(), Math.min(MAX_ROW_KEYS, Math.floor((bytes.length - offset) / 4)), "hemx Rows keys");
+      for (let index = 0; index < orderLength; index += 1) order.push(str());
+      const rowsLength = boundedLength(u32(), orderLength, "hemx Rows rows");
+      const rows = [];
+      for (let index = 0; index < rowsLength; index += 1) rows.push([str(), str()]);
+      const ordered = new Set(order);
+      const supplied = new Set();
+      if (ordered.size !== order.length || rows.some(([key]) => !ordered.has(key) || supplied.size === supplied.add(key).size)) {
+        throw new Error("hemx Rows declaration repeats a key or supplies a row outside its order");
+      }
+      return { kind: "rows", target, order, rows };
+    };
+    const rowsDelta = () => {
+      const target = ref();
+      const from = u64();
+      const to = u64();
+      const stepsLength = boundedLength(u32(), Math.min(MAX_ROW_KEYS, Math.floor((bytes.length - offset) / 5)), "hemx RowsDelta steps");
+      const steps = [];
+      for (let index = 0; index < stepsLength; index += 1) {
+        const tag = u8();
+        if (tag === 0) steps.push({ op: "remove", key: str() });
+        else if (tag === 1) {
+          const key = str();
+          steps.push({ op: "place", key, before: enumValue([false, true], "hemx RowsDelta anchor") ? str() : null });
+        } else throw new Error(`unknown hemx RowsDelta step ${tag}`);
+      }
+      const rowsLength = boundedLength(u32(), Math.min(MAX_ROW_KEYS, Math.floor((bytes.length - offset) / 8)), "hemx RowsDelta rows");
+      const rows = [];
+      for (let index = 0; index < rowsLength; index += 1) rows.push([str(), str()]);
+      if (new Set(rows.map(([key]) => key)).size !== rows.length) {
+        throw new Error("hemx row declaration repeats a key");
+      }
+      return { kind: "rowsDelta", target, from, to, steps, rows };
     };
     const effect = () => {
       const kind = u8();
       if (kind === 0) return { kind: "patch", target: ref(), mode: enumValue(["morph", "replace"], "hemx patch mode"), html: str() };
-      if (kind === 1) return { kind: "insert", target: ref(), position: position(), html: str() };
-      if (kind === 2) return { kind: "remove", target: ref() };
-      if (kind === 3) return { kind: "move", target: ref(), position: position() };
-      if (kind === 4) return { kind: "focus", target: ref(), preventScroll: u8() !== 0 };
-      if (kind === 5) return { kind: "scroll", target: ref(), block: enumValue(["start", "center", "end", "nearest"], "hemx scroll block"), behavior: enumValue(["auto", "instant", "smooth"], "hemx scroll behavior") };
-      if (kind === 6) return { kind: "visit", url: str(), history: enumValue(["push", "replace"], "hemx history mode") };
-      if (kind === 7) return { kind: "dispatch", event: str(), payload: bytesField() };
+      if (kind === 1) return rowsDeclaration();
+      if (kind === 2) return { kind: "focus", target: ref(), preventScroll: enumValue([false, true], "hemx boolean") };
+      if (kind === 3) return { kind: "scroll", target: ref(), block: enumValue(["start", "center", "end", "nearest"], "hemx scroll block"), behavior: enumValue(["auto", "instant", "smooth"], "hemx scroll behavior") };
+      if (kind === 4) return { kind: "visit", url: str(), history: enumValue(["push", "replace"], "hemx history mode") };
+      if (kind === 5) return { kind: "dispatch", event: str(), payload: bytesField() };
+      if (kind === 6) return rowsDelta();
       throw new Error(`unknown hemx effect ${kind}`);
     };
     const vec = (read) => {
@@ -987,8 +1329,8 @@
     const d = decoder(buffer);
     if (String.fromCharCode(d.u8(), d.u8(), d.u8(), d.u8()) !== "HEMX") throw new Error("bad hemx batch magic");
     const abiVersion = d.u32();
-    if (abiVersion !== runtimeAbiVersion) {
-      const error = new Error(`unsupported hemx batch ABI version ${abiVersion}; expected ${runtimeAbiVersion}`);
+    if (abiVersion !== EFFECT_BATCH_ABI_VERSION) {
+      const error = new Error(`unsupported hemx batch ABI version ${abiVersion}; expected ${EFFECT_BATCH_ABI_VERSION}`);
       error.code = "HEMX_UNSUPPORTED_ABI";
       throw error;
     }
@@ -998,51 +1340,43 @@
   }
 
   function sameOriginNav(event, anchor) {
+    // Test the attribute: an empty `download` value still requests a download.
     return !event.defaultPrevented && event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey &&
-      anchor.origin === location.origin && !anchor.download && anchor.target !== "_blank";
+      anchor.origin === location.origin && !dom.has(anchor, "download") && (!anchor.target || anchor.target === "_self");
   }
 
   function descendantRoots(node) {
-    const roots = [];
-    for (const child of node.children || []) {
-      if (child.hasAttribute(ROOT)) roots.push(child);
-      roots.push(...descendantRoots(child));
-    }
-    return roots;
-  }
-
-  function stopDescendantPolling(node) {
-    for (const child of node.children || []) {
-      if (child.hasAttribute("data-hemx-every") || child.hasAttribute("data-hemx-interval")) {
-        stopPolling(child);
-      }
-      stopDescendantPolling(child);
-    }
+    const found = [];
+    forEachElement(node, (child) => { if (child !== node && dom.has(child, ROOT)) found.push(child); });
+    return found;
   }
 
   function cleanupRemovedFragment(node) {
-    if (node.hasAttribute(ROOT)) cleanupRemovedRoot(node);
-    descendantRoots(node).forEach(cleanupRemovedRoot);
-    if (node.hasAttribute("data-hemx-every") || node.hasAttribute("data-hemx-interval")) stopPolling(node);
-    stopDescendantPolling(node);
-    revealed.delete(node);
     forEachElement(node, (element) => {
-      if (element.hasAttribute("data-hemx-revealed")) revealed.delete(element);
+      const connected = dom.isConnected(element) && dom.ownerDocument(element) === document;
+      const owner = connected ? rootOf(element) : null;
+      if (!connected || (timers.has(element) && timers.get(element).owner !== owner)) cancelScheduled(element);
+      if (!connected || (everyTimers.has(element) && everyTimers.get(element).owner !== owner)) stopPolling(element);
+      if (!connected || (revealBindings.has(element) && revealBindings.get(element).root !== owner)) stopRevealed(element);
+      if (!connected || (revealed.has(element) && revealed.get(element) !== owner)) revealed.delete(element);
+      if ((!connected || !dom.has(element, ROOT)) &&
+          (dom.has(element, ROOT) || sseSources.has(element) || revealObservers.has(element))) cleanupRemovedRoot(element);
     });
   }
 
   function cleanupRemovedRoot(root) {
     const source = sseSources.get(root);
-    if (source) source.close();
     sseSources.delete(root);
-    const socket = webSockets.get(root);
-    if (socket) socket.close();
-    webSockets.delete(root);
+    source?.close();
     const observers = revealObservers.get(root);
     if (observers) observers.forEach((observer) => observer.disconnect());
     revealObservers.delete(root);
-    stopDescendantPolling(root);
-    boundRoots.delete(root);
+    forEachElement(root, (el) => {
+      if (everyTimers.get(el)?.owner === root) stopPolling(el);
+      if (revealBindings.get(el)?.root === root) stopRevealed(el);
+    });
+    // A connected move keeps its owner and listeners. Detached roots may later
+    // reattach; the same guarded listener set remains valid without rebinding.
   }
 
   function rebindRevealed(resetDispatched) {
@@ -1050,12 +1384,11 @@
       const observers = revealObservers.get(root);
       if (observers) observers.forEach((observer) => observer.disconnect());
       revealObservers.delete(root);
-      if (resetDispatched) {
-        forEachElement(root, (el) => {
-          if (attrEquals(el, "data-hemx-on", "revealed") || el.hasAttribute("data-hemx-revealed")) revealed.delete(el);
-        });
-      }
-      bindRevealed(root);
+      forEachOwned(root, (el) => {
+        stopRevealed(el);
+        if (resetDispatched) revealed.delete(el);
+      });
+      bindAdapter(root, "revealed", () => bindRevealed(root));
     });
   }
 
@@ -1064,10 +1397,9 @@
   }
 
   function bindEnhancedRoot(root) {
-    root.setAttribute("data-hemx-request-timeout-ms", String(REQUEST_TIMEOUT_MS));
+    if (!activeRoot(root)) return;
     bindAdapter(root, "events", () => bindRoot(root));
     bindAdapter(root, "sse", () => bindSse(root));
-    bindAdapter(root, "websocket", () => bindWebSocket(root));
     bindAdapter(root, "polling", () => bindPolling(root));
     bindAdapter(root, "revealed", () => bindRevealed(root));
   }
@@ -1082,41 +1414,48 @@
   }
 
   function start() {
+    forms.bind();
     roots().forEach(bindEnhancedRoot);
     new MutationObserver((records) => {
-      records.forEach((record) => {
-        record.removedNodes.forEach((node) => {
-          if (!(node instanceof Element)) return;
-          cleanupRemovedFragment(node);
-        });
-        record.addedNodes.forEach((node) => {
-          if (!(node instanceof Element)) return;
-          if (node.hasAttribute(ROOT)) bindEnhancedRoot(node);
-          descendantRoots(node).forEach(bindEnhancedRoot);
-          const owner = rootOf(node.parentElement);
-          if (owner) {
-            bindPolling(owner);
-            bindRevealed(owner);
-          }
-        });
-      });
-    }).observe(document.documentElement, { childList: true, subtree: true });
-    try {
-      history.replaceState(history.state || { hemx: true }, "", location.href);
-    } catch (error) {
-      const root = roots()[0];
-      if (root) emit(root, "hemx:history-error", String(error));
-    }
+      const owners = new Set();
+      const collect = (node) => {
+        if (!dom.element(node)) return;
+        cleanupRemovedFragment(node);
+        if (dom.has(node, ROOT)) owners.add(node);
+        descendantRoots(node).forEach((root) => owners.add(root));
+        const owner = rootOf(node);
+        if (owner) owners.add(owner);
+      };
+      for (const record of records) {
+        if (record.type === "attributes") {
+          const node = record.target;
+          if (record.attributeName === "data-hemx-every" || record.attributeName === "data-hemx-interval") stopPolling(node);
+          if (record.attributeName === "data-hemx-revealed" || record.attributeName === "data-hemx-revealed-ahead") stopRevealed(node);
+          if (record.attributeName === "data-hemx-revealed" && !dom.has(node, "data-hemx-revealed")) revealed.delete(node);
+          if (record.attributeName === "data-hemx-debounce" || record.attributeName === "data-hemx-throttle") cancelScheduled(node);
+          collect(node);
+        } else {
+          record.removedNodes.forEach((node) => { if (dom.element(node)) cleanupRemovedFragment(node); });
+          record.addedNodes.forEach(collect);
+        }
+      }
+      owners.forEach(bindEnhancedRoot);
+    }).observe(document.documentElement, {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: [ROOT, ISLAND, "data-hemx-sse", "data-hemx-every", "data-hemx-interval",
+        "data-hemx-revealed", "data-hemx-revealed-ahead", "data-hemx-debounce", "data-hemx-throttle"],
+    });
   }
 
   window.addEventListener("pageshow", restoreRevealed);
   window.addEventListener("resize", () => rebindRevealed(false));
 
-  addEventListener("popstate", (event) => {
+  // The server is the truth for every history entry: refetch it, never restore
+  // page HTML from history state (which would show stale server state).
+
+  addEventListener("popstate", () => {
     const root = roots()[0];
-    if (root && !restorePage(event.state, root)) {
-      if (root) navigateUrl(location.href, root, "none").catch((error) => emit(root, "hemx:error", String(error)));
-    }
+    if (root) navigateUrl(location.href, root, "none").catch((error) => emit(root, "hemx:error", String(error)));
   });
 
   window.hemx = Object.freeze({

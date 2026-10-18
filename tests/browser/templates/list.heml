@@ -1,0 +1,8 @@
+<main data-hemx-root>
+  <ul id="rows" data-hemx-collection="row">
+    <template h-for="todo in &self.todos" h-key="todo.id">
+      <li +data-hemx-key="todo.id">{+ todo.title +}</li>
+    </template>
+  </ul>
+  <p id="status" data-hemx-slot="status">before</p>
+</main>

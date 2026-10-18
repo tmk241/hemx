@@ -218,7 +218,9 @@ impl EffectInspector {
         self.batch.ops.iter().any(|op| {
             matches!(
                 op,
-                Effect::Patch { target, .. } | Effect::Insert { target, .. }
+                Effect::Patch { target, .. }
+                    | Effect::Rows { target, .. }
+                    | Effect::RowsDelta { target, .. }
                     if target.resource == resource
             )
         })
@@ -245,11 +247,10 @@ impl EffectInspector {
 
     fn has_html_update_containing(&self, resource: ResourceId, needle: &str) -> bool {
         self.batch.ops.iter().any(|op| {
-            matches!(
-                op,
-                Effect::Patch { target, html, .. } | Effect::Insert { target, html, .. }
-                    if target.resource == resource && html.as_str().contains(needle)
-            )
+            op_targets_resource(op, resource)
+                && effect_html(op)
+                    .iter()
+                    .any(|(html, _)| html.contains(needle))
         })
     }
 
@@ -271,7 +272,7 @@ impl EffectInspector {
 
     /// Parse the single HTML effect for a generated target as a fragment.
     ///
-    /// `Put`, `Insert`, and `Prepend` HTML payloads are supported. The parser is
+    /// A `Patch` or a `Rows` declaration supplying exactly one row is supported. The parser is
     /// kept internal; the returned inspector and all selected elements own their
     /// observable data.
     pub fn target_html_fragment(
@@ -298,11 +299,7 @@ impl EffectInspector {
             .collect::<Vec<_>>();
         let html_effects = target_effects
             .iter()
-            .filter_map(|effect| match effect {
-                Effect::Patch { html, .. } => Some((html.as_str(), "Patch")),
-                Effect::Insert { html, .. } => Some((html.as_str(), "Insert")),
-                _ => None,
-            })
+            .flat_map(|effect| effect_html(effect))
             .collect::<Vec<_>>();
 
         match html_effects.as_slice() {
@@ -342,35 +339,40 @@ impl EffectInspector {
         })
     }
 
-    /// Assert that a keyed generated target appends HTML containing text.
-    pub fn inserts_html_containing(
+    /// Check that a collection declaration supplies row `key` with HTML containing text.
+    pub fn declares_row_containing(
         &self,
         target: impl GeneratedTarget,
         key: impl ToString,
         needle: &str,
     ) -> bool {
         let resource = target.__hemx_resource_id();
-        let key_marker = format!("data-hemx-key=\"{}\"", key.to_string());
+        let key = key.to_string();
         self.batch.ops.iter().any(|op| {
             matches!(
                 op,
-                Effect::Insert { target, html, .. }
+                Effect::Rows { target, rows, .. } | Effect::RowsDelta { target, rows, .. }
                     if target.resource == resource
-                        && html.as_str().contains(&key_marker)
-                        && html.as_str().contains(needle)
+                        && rows.iter().any(|(row, html)| *row == key && html.as_str().contains(needle))
             )
         })
     }
 
-    /// Assert that a keyed generated target removes a key.
+    /// Check that a collection declaration removes `key`: a full declaration
+    /// leaves it out of its order, or a delta has a step removing it.
     pub fn removes_key(&self, target: impl GeneratedTarget, key: impl ToString) -> bool {
         let resource = target.__hemx_resource_id();
         let key = key.to_string();
         self.batch.ops.iter().any(|op| {
             matches!(
                 op,
-                Effect::Remove { target }
-                    if target.resource == resource && target.scope == Some(ScopeKey::KeyValue(key.clone()))
+                Effect::Rows { target, order, .. }
+                    if target.resource == resource && !order.contains(&key)
+            ) || matches!(
+                op,
+                Effect::RowsDelta { target, steps, .. }
+                    if target.resource == resource
+                        && steps.contains(&hemx_core::RowStep::Remove(key.clone()))
             )
         })
     }
@@ -419,10 +421,12 @@ impl EffectInspector {
             {
                 Some(html.as_str())
             }
-            Effect::Insert { target, html, .. }
-                if target.resource == resource && html.as_str().contains(needle) =>
+            Effect::Rows { target, rows, .. } | Effect::RowsDelta { target, rows, .. }
+                if target.resource == resource =>
             {
-                Some(html.as_str())
+                rows.iter()
+                    .map(|(_, html)| html.as_str())
+                    .find(|html| html.contains(needle))
             }
             _ => None,
         })
@@ -472,22 +476,31 @@ impl EffectInspector {
 
 fn effect_payload_contains(op: &Effect, needle: &str) -> bool {
     match op {
-        Effect::Patch { html, .. } | Effect::Insert { html, .. } => html.as_str().contains(needle),
+        Effect::Patch { html, .. } => html.as_str().contains(needle),
+        Effect::Rows { order, rows, .. } => {
+            order.iter().any(|key| key.contains(needle))
+                || rows.iter().any(|(_, html)| html.as_str().contains(needle))
+        }
+        Effect::RowsDelta { steps, rows, .. } => {
+            steps.iter().any(|step| match step {
+                hemx_core::RowStep::Remove(key) => key.contains(needle),
+                hemx_core::RowStep::Place { key, before } => {
+                    key.contains(needle)
+                        || before.as_deref().is_some_and(|key| key.contains(needle))
+                }
+            }) || rows.iter().any(|(_, html)| html.as_str().contains(needle))
+        }
         Effect::Dispatch { payload, .. } => String::from_utf8_lossy(payload).contains(needle),
         Effect::Visit { url, .. } => url.contains(needle),
-        Effect::Remove { .. }
-        | Effect::Move { .. }
-        | Effect::Focus { .. }
-        | Effect::Scroll { .. } => false,
+        Effect::Focus { .. } | Effect::Scroll { .. } => false,
     }
 }
 
 fn op_targets_resource(op: &Effect, resource: ResourceId) -> bool {
     match op {
         Effect::Patch { target, .. }
-        | Effect::Insert { target, .. }
-        | Effect::Remove { target }
-        | Effect::Move { target, .. }
+        | Effect::Rows { target, .. }
+        | Effect::RowsDelta { target, .. }
         | Effect::Focus { target, .. }
         | Effect::Scroll { target, .. } => target.resource == resource,
         Effect::Visit { .. } | Effect::Dispatch { .. } => false,
@@ -497,11 +510,26 @@ fn op_targets_resource(op: &Effect, resource: ResourceId) -> bool {
 fn op_targets_ref(op: &Effect, wanted: &ResourceRef) -> bool {
     match op {
         Effect::Patch { target, .. }
-        | Effect::Insert { target, .. }
-        | Effect::Remove { target }
-        | Effect::Move { target, .. }
+        | Effect::Rows { target, .. }
+        | Effect::RowsDelta { target, .. }
         | Effect::Focus { target, .. }
         | Effect::Scroll { target, .. } => target == wanted,
         Effect::Visit { .. } | Effect::Dispatch { .. } => false,
+    }
+}
+
+/// Every HTML payload of an effect with its kind, for target inspection.
+fn effect_html(effect: &Effect) -> Vec<(&str, &'static str)> {
+    match effect {
+        Effect::Patch { html, .. } => vec![(html.as_str(), "Patch")],
+        Effect::Rows { rows, .. } => rows
+            .iter()
+            .map(|(_, html)| (html.as_str(), "Rows"))
+            .collect(),
+        Effect::RowsDelta { rows, .. } => rows
+            .iter()
+            .map(|(_, html)| (html.as_str(), "RowsDelta"))
+            .collect(),
+        _ => Vec::new(),
     }
 }

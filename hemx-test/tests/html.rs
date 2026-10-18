@@ -1,6 +1,5 @@
 use hemx_core::{
-    Effect, GeneratedTarget, InsertPosition, PatchMode, ResourceId, ResourceKind, ResourceRef,
-    SafeHtml,
+    Effect, GeneratedTarget, PatchMode, ResourceId, ResourceKind, ResourceRef, SafeHtml,
 };
 
 fn panic_text<T>(result: std::thread::Result<T>) -> String {
@@ -95,30 +94,20 @@ fn inspects_generated_target_document_and_fragment_payloads() {
     document.assert_text("main#app", "ready");
     assert!(document.origin().contains("Patch HTML effect"));
 
-    for (effect, operation) in [
-        (
-            Effect::Insert {
-                target: ResourceRef::unscoped(ResourceId::new(ResourceKind::Slot, 2)),
-                position: InsertPosition::Last,
-                html: SafeHtml::trusted("<li data-hemx-key=later>later</li>"),
-            },
-            "Insert",
-        ),
-        (
-            Effect::Insert {
-                target: ResourceRef::unscoped(ResourceId::new(ResourceKind::Slot, 2)),
-                position: InsertPosition::First,
-                html: SafeHtml::trusted("<li data-hemx-key=first>first</li>"),
-            },
-            "Insert",
-        ),
-    ] {
-        let fragment = hemx_test::inspect(effect)
-            .target_html_fragment(TestTarget(ResourceKind::Slot, 2))
-            .unwrap();
-        fragment.assert_count("li[data-hemx-key]", 1);
-        assert!(fragment.origin().contains(operation));
-    }
+    // A Rows declaration supplying one row is inspectable like a Patch.
+    let declared = Effect::Rows {
+        target: ResourceRef::unscoped(ResourceId::new(ResourceKind::Slot, 2)),
+        order: vec!["first".into(), "later".into()],
+        rows: vec![(
+            "later".into(),
+            SafeHtml::trusted("<li data-hemx-key=later>later</li>"),
+        )],
+    };
+    let fragment = hemx_test::inspect(declared)
+        .target_html_fragment(TestTarget(ResourceKind::Slot, 2))
+        .unwrap();
+    fragment.assert_count("li[data-hemx-key]", 1);
+    assert!(fragment.origin().contains("Rows"));
 }
 
 #[test]
@@ -152,10 +141,10 @@ fn target_html_errors_explain_missing_non_html_and_ambiguous_effects() {
             mode: PatchMode::Morph,
             html: SafeHtml::trusted("<p>one</p>"),
         },
-        Effect::Insert {
+        Effect::Rows {
             target: ResourceRef::unscoped(ResourceId::new(ResourceKind::Slot, 1)),
-            position: InsertPosition::Last,
-            html: SafeHtml::trusted("<p>two</p>"),
+            order: vec!["k".into()],
+            rows: vec![("k".into(), SafeHtml::trusted("<p>two</p>"))],
         },
     ])
     .target_html_fragment(TestTarget(ResourceKind::Slot, 1))

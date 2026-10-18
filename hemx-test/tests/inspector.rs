@@ -1,6 +1,6 @@
 use hemx_core::{
-    BuildFingerprint, Effect, EffectBatch, Form, GeneratedTarget, HistoryMode, InsertPosition,
-    KeyedSlot, PatchMode, ResourceId, ResourceKind, ResourceRef, SafeHtml, ScopeKey, Slot,
+    BuildFingerprint, Effect, EffectBatch, Form, GeneratedTarget, HistoryMode, KeyedSlot,
+    PatchMode, ResourceId, ResourceKind, ResourceRef, SafeHtml, ScopeKey, Slot,
 };
 
 #[derive(Clone, Copy)]
@@ -102,7 +102,7 @@ fn html_update_assertion_reports_expectation_and_actual_effects() {
 #[test]
 fn finds_keyed_slot_targets() {
     let rows = KeyedSlot::<u32, String>::new(9);
-    let inspected = hemx_test::inspect(rows.append_text(7, String::from("row")));
+    let inspected = hemx_test::inspect(rows.replace_html(7, SafeHtml::trusted("row")));
 
     assert!(inspected.has_keyed_slot(rows));
     assert_eq!(inspected.ops().len(), 1);
@@ -135,21 +135,14 @@ fn inspector_predicates_bind_operation_target_scope_kind_and_payload() {
             mode: PatchMode::Replace,
             html: SafeHtml::trusted("<li data-hemx-key=\"row-1\">replacement</li>"),
         },
-        Effect::Insert {
+        // row-old is left out of the declared order, i.e. removed.
+        Effect::Rows {
             target: ResourceRef::unscoped(resource),
-            position: InsertPosition::After(ResourceRef::scoped(
-                resource,
-                ScopeKey::KeyValue("row-1".into()),
-            )),
-            html: SafeHtml::trusted("<li data-hemx-key=\"row-2\">inserted</li>"),
-        },
-        Effect::Insert {
-            target: ResourceRef::unscoped(resource),
-            position: InsertPosition::First,
-            html: SafeHtml::trusted("<li data-hemx-key=\"row-0\">prepended</li>"),
-        },
-        Effect::Remove {
-            target: ResourceRef::scoped(resource, ScopeKey::KeyValue("row-old".into())),
+            order: vec!["row-0".into(), "row-1".into(), "row-2".into()],
+            rows: vec![
+                ("row-2".into(), SafeHtml::trusted("<li>inserted</li>")),
+                ("row-0".into(), SafeHtml::trusted("<li>prepended</li>")),
+            ],
         },
         Effect::Focus {
             target: ResourceRef::unscoped(form.id()),
@@ -163,7 +156,7 @@ fn inspector_predicates_bind_operation_target_scope_kind_and_payload() {
     ]);
 
     assert!(!inspected.is_empty());
-    assert_eq!(inspected.op_count(), 9);
+    assert_eq!(inspected.op_count(), 7);
     assert!(inspected.contains(&expected_emit));
     assert!(!inspected.contains(&Effect::Dispatch {
         event: "saved".into(),
@@ -185,8 +178,8 @@ fn inspector_predicates_bind_operation_target_scope_kind_and_payload() {
     assert!(!inspected.updates_html(TestTarget(ResourceKind::Slot, 99)));
     assert!(inspected.replaces_keyed_html_containing(expected, "row-1", "replacement"));
     assert!(!inspected.replaces_keyed_html_containing(expected, "row-2", "replacement"));
-    assert!(inspected.inserts_html_containing(expected, "row-2", "inserted"));
-    assert!(!inspected.inserts_html_containing(expected, "row-0", "inserted"));
+    assert!(inspected.declares_row_containing(expected, "row-2", "inserted"));
+    assert!(!inspected.declares_row_containing(expected, "row-0", "inserted"));
     assert!(inspected.removes_key(expected, "row-old"));
     assert!(!inspected.removes_key(expected, "row-2"));
     assert!(inspected.pushes_to("/cards/42"));
@@ -203,11 +196,11 @@ fn inspector_predicates_bind_operation_target_scope_kind_and_payload() {
     );
     assert_eq!(
         inspected.target_html_containing(expected, "inserted"),
-        Some("<li data-hemx-key=\"row-2\">inserted</li>")
+        Some("<li>inserted</li>")
     );
     assert_eq!(
         inspected.target_html_containing(expected, "prepended"),
-        Some("<li data-hemx-key=\"row-0\">prepended</li>")
+        Some("<li>prepended</li>")
     );
     assert_eq!(inspected.target_html_containing(expected, "missing"), None);
     assert!(inspected.emits("saved", "card 42 saved"));
@@ -242,7 +235,7 @@ fn inspect_wire_reports_the_decode_failure_and_accepts_canonical_batches() {
             payload: b"ok".to_vec(),
         }],
     };
-    assert!(hemx_test::inspect_wire(&batch.to_wire()).emits("saved", "ok"));
+    assert!(hemx_test::inspect_wire(&batch.to_wire().unwrap()).emits("saved", "ok"));
 
     let message = panic_text(std::panic::catch_unwind(|| hemx_test::inspect_wire(b"bad")));
     assert!(message.contains("invalid hemx effect wire response: Truncated"));
@@ -260,4 +253,27 @@ fn builds_generated_handle_form_bodies() {
         "__h=7&AZaz09-_.~=AZaz09-_.~+%2F%C3%A9"
     );
     assert_eq!(hemx_test::unknown_handle_form_body(99), "__h=99");
+}
+
+#[test]
+fn row_deltas_are_inspected_like_full_declarations() {
+    let rows = TestTarget(ResourceKind::Slot, 4);
+    let delta = Slot::<()>::new(4).rows_delta_html(
+        ["a", "old"],
+        ["a", "new"],
+        [(
+            "new",
+            SafeHtml::trusted("<li data-hemx-key=\"new\">added</li>"),
+        )],
+    );
+    let inspected = hemx_test::inspect(delta);
+    assert!(inspected.updates_html(rows));
+    assert!(inspected.declares_row_containing(rows, "new", "added"));
+    assert!(inspected.removes_key(rows, "old"));
+    assert!(!inspected.removes_key(rows, "a"));
+    assert_eq!(
+        inspected.target_html_containing(rows, "added"),
+        Some("<li data-hemx-key=\"new\">added</li>")
+    );
+    assert!(inspected.payload_contains("added"));
 }

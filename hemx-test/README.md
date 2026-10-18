@@ -69,8 +69,9 @@ own the observable source and selected data. Structural inspection does not run
 JavaScript or prove browser-owned behavior such as focus, history, layout, or
 runtime reconciliation.
 
-A target inspector requires exactly one `Put`, `Insert`, or `Prepend` HTML
-payload for that generated target. Missing, non-HTML, and ambiguous target
+A target inspector requires exactly one `Patch`, or single-row `Rows` or
+`RowsDelta`, HTML payload for that generated target. `removes_key` accepts a
+full declaration that leaves the key out or a delta step removing it. Missing, non-HTML, and ambiguous target
 effects return `HtmlInspectionError` with the relevant effects in the
 diagnostic.
 

@@ -96,6 +96,34 @@ impl InteractionForm {
         Self::new(handle.id().id, fields)
     }
 
+    /// The build fingerprint submitted with this form, if present and well formed.
+    pub fn build_fingerprint(&self) -> Option<BuildFingerprint> {
+        self.value(HEMX_BUILD_FIELD)?
+            .parse()
+            .ok()
+            .map(BuildFingerprint)
+    }
+
+    /// Set the submitted build fingerprint, as a generated form would render it.
+    pub fn with_build(mut self, fingerprint: BuildFingerprint) -> Self {
+        self.fields.retain(|(name, _)| name != HEMX_BUILD_FIELD);
+        self.fields
+            .push((HEMX_BUILD_FIELD.to_owned(), fingerprint.0.to_string()));
+        self
+    }
+
+    /// Reject a form rendered by a different build than `current`.
+    ///
+    /// Registry dispatch calls this before any handler. Applications that read
+    /// the form directly must call it themselves; skipping it bypasses the guard.
+    pub fn require_build(&self, current: BuildFingerprint) -> Result<(), DispatchRejection> {
+        if self.build_fingerprint() == Some(current) {
+            Ok(())
+        } else {
+            Err(DispatchRejection::StaleBuild { expected: current })
+        }
+    }
+
     pub fn parse_urlencoded(body: &[u8]) -> Result<Self, InteractionFormRejection> {
         Self::from_parts(parse_urlencoded_pairs(body)?, Vec::new())
     }
@@ -106,20 +134,13 @@ impl InteractionForm {
         let mut fields = Vec::new();
         let mut files = Vec::new();
 
-        while let Some(field) = multipart
-            .next_field()
-            .await
-            .map_err(|_| InteractionFormRejection::InvalidBody)?
-        {
+        while let Some(field) = multipart.next_field().await.map_err(extractor_rejection)? {
             let Some(name) = field.name().map(str::to_owned) else {
                 continue;
             };
             let file_name = field.file_name().map(str::to_owned);
             let content_type = field.content_type().map(str::to_owned);
-            let bytes = field
-                .bytes()
-                .await
-                .map_err(|_| InteractionFormRejection::InvalidBody)?;
+            let bytes = field.bytes().await.map_err(extractor_rejection)?;
 
             if file_name.is_some() {
                 files.push(InteractionFile {
@@ -207,6 +228,10 @@ impl InteractionForm {
 impl IntoResponse for InteractionFormRejection {
     fn into_response(self) -> axum::response::Response {
         let (status, message) = match self {
+            Self::CrossSite => (
+                StatusCode::FORBIDDEN,
+                "hemx interactions are not accepted from another site",
+            ),
             Self::UnsupportedMediaType => (
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "hemx interactions require application/x-www-form-urlencoded or multipart/form-data",
@@ -240,6 +265,8 @@ where
     type Rejection = InteractionFormRejection;
 
     async fn from_request(request: Request<Body>, state: &S) -> Result<Self, Self::Rejection> {
+        // Decide on the browser-supplied request context before reading any body.
+        check_fetch_site(&request)?;
         match interaction_media_type(request.headers())? {
             InteractionMediaType::Multipart => {
                 let multipart = Multipart::from_request(request, state)
@@ -254,6 +281,22 @@ where
                 Self::parse_urlencoded(&bytes)
             }
         }
+    }
+}
+
+/// Reject requests the browser itself marks as cross-site. A missing header
+/// (older browsers, non-browser clients) is not a decision either way.
+fn check_fetch_site(request: &Request<Body>) -> Result<(), InteractionFormRejection> {
+    let site = request
+        .headers()
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok());
+    match site {
+        Some("cross-site") => Err(InteractionFormRejection::CrossSite),
+        Some("same-site") if request.extensions().get::<AllowSameSite>().is_none() => {
+            Err(InteractionFormRejection::CrossSite)
+        }
+        _ => Ok(()),
     }
 }
 

@@ -9,7 +9,7 @@ application concerns.
 
 ## How it works
 
-1. `.heml` templates declare page roots, slots, forms, handles, and keyed targets.
+1. `.heml` templates declare page roots, slots, collections, forms, handles, and keyed rows.
 2. `hemx-build` generates typed Rust helpers from that surface.
 3. `#[hemx::handler]` functions accept ordinary Rust inputs and return typed effects.
 4. `hemx-axum` serves pages, assets, handler routes, and effect responses.
@@ -17,18 +17,58 @@ application concerns.
 
 ```rust,ignore
 #[hemx::handler]
-async fn add_todo(form: NewTodo) -> impl IntoEffect {
-    ui::todos().append(TodoRow::from(form))
+async fn add_todo(app: App, form: hemx::Form<NewTodo>) -> impl hemx::IntoEffect {
+    let todos: Vec<TodoRow> = app.add(form.0).await;
+    ui::todos::rows.set(&todos)
 }
 ```
 
 ```html
-<form data-hemx-form="new_todo">
+<form action="/todos" method="post" data-hemx-form="new_todo" data-hemx-handle="add_todo">
   <input name="title" required>
   <button type="submit">Add</button>
 </form>
-<ul data-hemx-slot="todos"></ul>
+<ul data-hemx-collection="rows"></ul>
 ```
+
+This excerpt uses a `todos.heml` template, application state `App`, and an
+application-defined `TodoRow` implementing `Hemplate` and `hemx::KeyedPartial`.
+Effects declare state rather than issue commands. A collection either receives
+its complete content (`set`) or a transition from one key order to the next
+(`transition(&before, &after, &changed)`): only the steps between the two
+orders and the changed rows travel, and the browser applies them only when its
+rows are in the `before` order. Applying either twice changes nothing, so a
+newer declaration may replace an unsent older one. Keyed row targets replace
+one existing row; ordinary slots remain HTML/text update hosts. Generated
+rendering helpers lower the complete resource table, including nested
+components.
+
+Wire ABI and runtime ABI are version 3; the surface schema is version 2.
+Encoding is fallible: `batch.to_wire()?` rejects incompatible or oversized
+batches before emitting bytes. Earlier wire ABIs are rejected, not translated.
+
+## Migrating from 0.4 to 0.5
+
+Rust 1.91 or newer is required. Use Hemplate 0.4 with hemplate-runtime 0.3;
+older runtime crates do not define the context traits used by `RuntimeScript`.
+
+- Wire ABI 3 replaces insertion/removal/movement commands with collection
+  `set` and `transition(before, after, changed)` declarations. Rebuild templates,
+  server and browser assets together; ABI 2 is rejected rather than translated.
+- Generated action forms carry `__b`. Handler dispatch rejects stale builds
+  with 409 and cross-site requests with 403 before handlers run. Manual dispatch
+  must use `require_build`; an enhanced failed POST is never replayed.
+- Use `hemx_axum::RuntimeScript` for an interpolated Hemplate `<script src>`.
+  Hemplate now requires checked or explicitly trusted context-specific values
+  where ordinary text escaping cannot prevent execution.
+- `data-hemx-ws` is rejected. Use SSE or an application-owned socket feeding
+  `window.hemx.applyBatch`. Only controls and `data-hemx-param-*` become request
+  fields; drag keys use `__drag`. History navigation refetches server HTML.
+- Text helpers escape values; only explicit `SafeHtml` introduces markup.
+- Batch coalescing retains **every intermediate operation**. It reduces SSE
+  envelopes, not DOM operations. A coalesced frame is one batch: an application
+  failure stops its remaining effects. Apps must supply valid transitions and
+  use replay/snapshot recovery when continuity is lost.
 
 ## Design boundary
 

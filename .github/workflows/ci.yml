@@ -10,6 +10,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - run: cargo check --locked --workspace --all-targets --all-features
   test:
     runs-on: ubuntu-latest
     steps:

@@ -29,7 +29,7 @@ fn representative_batch() -> EffectBatch {
 fn main() {
     let batch = representative_batch();
     for _ in 0..10_000 {
-        black_box(batch.to_wire());
+        black_box(batch.to_wire().expect("bounded benchmark batch"));
     }
 
     let mut nanos_per_batch = [0_u128; ROUNDS];
@@ -37,7 +37,9 @@ fn main() {
     for round in &mut nanos_per_batch {
         let start = Instant::now();
         for _ in 0..ITERATIONS {
-            let bytes = black_box(&batch).to_wire();
+            let bytes = black_box(&batch)
+                .to_wire()
+                .expect("bounded benchmark batch");
             checksum = checksum.wrapping_add(black_box(bytes.len()));
         }
         *round = start.elapsed().as_nanos() / u128::from(ITERATIONS);

@@ -1,0 +1,1 @@
+<li>{+ self.title +}</li>

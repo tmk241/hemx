@@ -21,12 +21,29 @@ pub(super) struct Resources {
     pub(super) events: BTreeMap<String, EventToken>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SlotRole {
+    Slot,
+    Row,
+    Collection,
+}
+
+impl SlotRole {
+    fn fingerprint_part(self) -> u32 {
+        match self {
+            Self::Slot => 0,
+            Self::Row => 1,
+            Self::Collection => 2,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct Resource {
     pub(super) symbol: String,
     pub(super) ident: String,
     pub(super) component: String,
-    pub(super) keyed: bool,
+    pub(super) role: SlotRole,
     pub(super) id: u32,
 }
 
@@ -93,11 +110,21 @@ impl Resources {
 
             if let Some(name) = static_attr(&node.attrs, "data-hemx-slot") {
                 reject_unkeyed_loop(surface, node.scope, path, "slot", &name)?;
-                let keyed = is_inside_keyed_for(surface, node.scope)
-                    || (can_host_keyed_collection(tag)
-                        && has_descendant_keyed_for_scope(surface, node.scope));
+                let role = if is_inside_keyed_for(surface, node.scope)
+                    || node.attrs.iter().any(|attr| attr.name == "data-hemx-key")
+                {
+                    SlotRole::Row
+                } else {
+                    SlotRole::Slot
+                };
                 let canonical = canonical_symbol(root, path, &name);
-                self.insert_slot(canonical, name, component.clone(), keyed)?;
+                self.insert_slot(canonical, name, component.clone(), role)?;
+            }
+            if let Some(name) = static_attr(&node.attrs, "data-hemx-collection") {
+                // A collection may repeat under separate roots, even in an unkeyed loop.
+                // Runtime root ownership and destination uniqueness decide addressability.
+                let canonical = canonical_symbol(root, path, &name);
+                self.insert_slot(canonical, name, component.clone(), SlotRole::Collection)?;
             }
 
             if let Some(name) = static_attr(&node.attrs, "data-hemx-handle") {
@@ -146,10 +173,22 @@ impl Resources {
         symbol: String,
         name: String,
         component: String,
-        keyed: bool,
+        role: SlotRole,
     ) -> io::Result<()> {
+        let ident = rust_ident(&name);
+        if let Some(existing) = ident.as_ref().and_then(|ident| self.slots.get(ident)) {
+            if existing.symbol == symbol && existing.role != role {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "conflicting slot roles for `{symbol}`: {:?} and {role:?}; use distinct names for ordinary slots, keyed rows, and collections",
+                        existing.role
+                    ),
+                ));
+            }
+        }
         let slot = insert_resource(&mut self.slots, "slot", symbol, name, component)?;
-        slot.keyed |= keyed;
+        slot.role = role;
         Ok(())
     }
 
@@ -214,7 +253,7 @@ impl Resources {
             let Some(param) = data_param_ident(&attr.name) else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("invalid handler param attribute `{}`; expected data-* name usable from Rust", attr.name),
+                    format!("invalid handler param attribute `{}`; expected data-hemx-param-* name usable from Rust", attr.name),
                 ));
             };
             self.handle_params
@@ -243,7 +282,7 @@ impl Resources {
     ) -> io::Result<()> {
         let controls = controls
             .into_iter()
-            .filter(|control| control.name != "__h")
+            .filter(|control| control.name != "__h" && control.name != "__b")
             .collect();
         let resource = make_resource("form", symbol, name, component)?;
         match self.forms.get(&resource.ident) {
@@ -289,21 +328,17 @@ impl Resources {
                 .join(", ")
         ));
 
-        let component_names: BTreeSet<String> = self.component_names().into_iter().collect();
-
         let root_indent = usize::default();
         if global_exports {
             self.push_component_refs(&mut out);
-            self.push_resource_modules(&mut out, &component_names, None, root_indent);
+            self.push_resource_modules(&mut out, None, root_indent);
         }
         self.push_lowering_api(&mut out, None, root_indent);
 
         for component in self.component_names() {
             out.push_str("\n#[allow(non_upper_case_globals)]\n");
             out.push_str(&format!("pub mod {component} {{\n"));
-            out.push_str("    #[derive(Clone, Copy)]\n");
-            out.push_str("    pub struct Component;\n\n");
-            self.push_resource_modules(&mut out, &component_names, Some(&component), 1);
+            self.push_resource_modules(&mut out, Some(&component), 1);
             self.push_lowering_api(&mut out, Some(&component), 1);
             out.push_str("}\n");
         }
@@ -326,7 +361,6 @@ impl Resources {
     pub(super) fn push_resource_modules(
         &self,
         out: &mut String,
-        components: &BTreeSet<String>,
         component: Option<&str>,
         indent: usize,
     ) {
@@ -352,7 +386,7 @@ impl Resources {
             .values()
             .filter(|res| component_matches(res, component))
         {
-            if res.keyed {
+            if res.role == SlotRole::Row {
                 out.push_str(&format!(
                     "{slot_inner}pub const {}: ::hemx::advanced::KeyedSlot<::std::string::String, ::std::string::String> = ::hemx::advanced::KeyedSlot::new({});\n",
                     res.ident, res.id
@@ -370,117 +404,79 @@ impl Resources {
         out.push_str(&format!(
             "{pad}#[allow(non_upper_case_globals)]\n{pad}pub mod targets {{\n"
         ));
-        let child_prefix = if component.is_some() {
-            "super::super::"
-        } else {
-            "super::"
-        };
-        out.push_str(&format!("{inner}#[derive(Clone, Copy)]\n"));
-        out.push_str(&format!(
-            "{inner}pub struct SlotTarget<T, C = ()> {{ slot: ::hemx::advanced::Slot<T>, _marker: ::std::marker::PhantomData<C> }}\n"
-        ));
-        out.push_str(&format!("{inner}#[allow(dead_code)]\n"));
-        out.push_str(&format!("{inner}impl<T, C> SlotTarget<T, C> {{\n"));
-        out.push_str(&format!("{inner}    const fn new(slot: ::hemx::advanced::Slot<T>) -> Self {{ Self {{ slot, _marker: ::std::marker::PhantomData }} }}\n"));
-        out.push_str(&format!("{inner}    pub fn text(self, value: impl ::std::string::ToString) -> ::hemx::advanced::Effect {{ self.slot.text(value) }}\n"));
-        out.push_str(&format!("{inner}    pub fn set(self, value: impl ::std::string::ToString) -> ::hemx::advanced::Effect {{ self.slot.text(value) }}\n"));
-        out.push_str(&format!("{inner}}}\n"));
-        out.push_str(&format!("{inner}impl<T> SlotTarget<T, ()> {{\n"));
-        out.push_str(&format!("{inner}    pub fn put(self, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ super::put(self.slot, view) }}\n"));
-        out.push_str(&format!("{inner}    pub fn replace(self, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ super::put(self.slot, view) }}\n"));
-        out.push_str(&format!("{inner}}}\n"));
-        for res in self
-            .slots
-            .values()
-            .filter(|res| component_matches(res, component))
-            .filter(|res| components.contains(&res.ident) && Some(res.ident.as_str()) != component)
-        {
-            let child = &res.ident;
-            out.push_str(&format!(
-                "{inner}impl<T> SlotTarget<T, {child_prefix}{child}::Component> {{\n"
-            ));
-            out.push_str(&format!("{inner}    pub fn put(self, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ {child_prefix}{child}::put(self.slot, view) }}\n"));
-            out.push_str(&format!("{inner}    pub fn replace(self, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ {child_prefix}{child}::put(self.slot, view) }}\n"));
-            out.push_str(&format!("{inner}}}\n"));
+        out.push_str(&format!(r#"{inner}#[derive(Clone, Copy)]
+{inner}pub struct SlotTarget<T> {{ slot: ::hemx::advanced::Slot<T> }}
+{inner}#[allow(dead_code)]
+{inner}impl<T> SlotTarget<T> {{
+{inner}    const fn new(slot: ::hemx::advanced::Slot<T>) -> Self {{ Self {{ slot }} }}
+{inner}    pub fn text(self, __hemx_value: impl ::std::string::ToString) -> ::hemx::advanced::Effect {{ self.slot.text(__hemx_value) }}
+{inner}    pub fn set(self, __hemx_value: impl ::std::string::ToString) -> ::hemx::advanced::Effect {{ self.slot.text(__hemx_value) }}
+{inner}    pub fn put(self, __hemx_view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ super::put(self.slot, __hemx_view) }}
+{inner}    pub fn replace(self, __hemx_view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ super::put(self.slot, __hemx_view) }}
+{inner}}}
+{inner}impl<T> ::hemx::GeneratedTarget for SlotTarget<T> {{
+{inner}    fn __hemx_resource_id(self) -> ::hemx::advanced::ResourceId {{ self.slot.id() }}
+{inner}}}
+{inner}#[derive(Clone, Copy)]
+{inner}pub struct KeyedSlotTarget<K, T> {{ slot: ::hemx::advanced::KeyedSlot<K, T> }}
+{inner}#[allow(dead_code)]
+{inner}impl<K: ::std::string::ToString, T> KeyedSlotTarget<K, T> {{
+{inner}    const fn new(slot: ::hemx::advanced::KeyedSlot<K, T>) -> Self {{ Self {{ slot }} }}
+{inner}}}
+{inner}impl<K: ::std::string::ToString, T> ::hemx::GeneratedTarget for KeyedSlotTarget<K, T> {{
+{inner}    fn __hemx_resource_id(self) -> ::hemx::advanced::ResourceId {{ self.slot.id() }}
+{inner}}}
+{inner}#[derive(Clone, Copy)]
+{inner}pub struct CollectionTarget<T> {{ slot: ::hemx::advanced::Slot<T>, rows: ::hemx::advanced::KeyedSlot<::std::string::String, T> }}
+{inner}#[allow(dead_code)]
+{inner}impl<T> CollectionTarget<T> {{
+{inner}    const fn new(slot: ::hemx::advanced::Slot<T>, row_slot: ::hemx::advanced::KeyedSlot<::std::string::String, T>) -> Self {{ Self {{ slot, rows: row_slot }} }}
+{inner}    /// Declare the complete collection: every row, in this order.
+{inner}    pub fn set<'a, V>(self, __hemx_rows: impl ::std::iter::IntoIterator<Item = &'a V>) -> ::hemx::advanced::Effect where V: 'a + ::hemplate::Hemplate + ::hemx::KeyedPartial {{
+{inner}        let __hemx_rows: ::std::vec::Vec<(::std::string::String, ::hemx::Html)> = __hemx_rows.into_iter().map(|__hemx_row| (__hemx_row.hemx_key(), super::render(__hemx_row))).collect();
+{inner}        let __hemx_order: ::std::vec::Vec<::std::string::String> = __hemx_rows.iter().map(|(__hemx_key, _)| __hemx_key.clone()).collect();
+{inner}        self.slot.rows_html(__hemx_order, __hemx_rows)
+{inner}    }}
+{inner}    /// Change the collection from the key order `before` to `after`, with the
+{inner}    /// rows that are new or changed. Only the steps between the two orders and
+{inner}    /// those rows travel; a client in any other state rejects it.
+{inner}    pub fn transition<'a, B, A, V>(self, __hemx_before: impl ::std::iter::IntoIterator<Item = B>, __hemx_after: impl ::std::iter::IntoIterator<Item = A>, __hemx_changed: impl ::std::iter::IntoIterator<Item = &'a V>) -> ::hemx::advanced::Effect where B: ::std::string::ToString, A: ::std::string::ToString, V: 'a + ::hemplate::Hemplate + ::hemx::KeyedPartial {{
+{inner}        self.slot.rows_delta_html(__hemx_before, __hemx_after, __hemx_changed.into_iter().map(|__hemx_row| (__hemx_row.hemx_key(), super::render(__hemx_row))))
+{inner}    }}
+{inner}}}
+{inner}impl<T> ::hemx::GeneratedTarget for CollectionTarget<T> {{
+{inner}    fn __hemx_resource_id(self) -> ::hemx::advanced::ResourceId {{ self.slot.id() }}
+{inner}}}
+"#));
+        // Both capabilities patch one existing row; only collections declare rows.
+        for (target, field) in [
+            ("KeyedSlotTarget<::std::string::String, T>", "slot"),
+            ("CollectionTarget<T>", "rows"),
+        ] {
+            out.push_str(&format!(r#"{inner}impl<T> {target} {{
+{inner}    pub fn replace(self, __hemx_view: impl ::hemplate::Hemplate + ::hemx::KeyedPartial) -> ::hemx::advanced::Effect {{ self.{field}.replace_html(__hemx_view.hemx_key(), super::render(&__hemx_view)) }}
+{inner}    pub fn replace_keyed(self, __hemx_key: impl ::std::string::ToString, __hemx_view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ self.{field}.replace_html(__hemx_key.to_string(), super::render(__hemx_view)) }}
+{inner}}}
+"#));
         }
-        out.push_str(&format!(
-            "{inner}impl<T, C> ::hemx::GeneratedTarget for SlotTarget<T, C> {{\n"
-        ));
-        out.push_str(&format!("{inner}    fn __hemx_resource_id(self) -> ::hemx::advanced::ResourceId {{ self.slot.id() }}\n"));
-        out.push_str(&format!("{inner}}}\n"));
-        out.push_str(&format!("{inner}#[derive(Clone, Copy)]\n"));
-        out.push_str(&format!("{inner}pub struct KeyedSlotTarget<K, T, C = ()> {{ slot: ::hemx::advanced::KeyedSlot<K, T>, _marker: ::std::marker::PhantomData<C> }}\n"));
-        out.push_str(&format!("{inner}#[allow(dead_code)]\n"));
-        out.push_str(&format!("{inner}impl<K, T, C> KeyedSlotTarget<K, T, C>\n"));
-        out.push_str(&format!("{inner}where\n"));
-        out.push_str(&format!("{inner}    K: ::std::string::ToString,\n"));
-        out.push_str(&format!("{inner}{{\n"));
-        out.push_str(&format!("{inner}    const fn new(slot: ::hemx::advanced::KeyedSlot<K, T>) -> Self {{ Self {{ slot, _marker: ::std::marker::PhantomData }} }}\n"));
-        out.push_str(&format!("{inner}}}\n"));
-        out.push_str(&format!(
-            "{inner}impl<K: ::std::string::ToString, T, C> KeyedSlotTarget<K, T, C> {{\n"
-        ));
-        out.push_str(&format!("{inner}    pub fn move_before(self, key: K, before: K) -> ::hemx::advanced::Effect {{ self.slot.move_before(key, before) }}\n"));
-        out.push_str(&format!("{inner}    pub fn move_to_end(self, key: K) -> ::hemx::advanced::Effect {{ self.slot.move_to_end(key) }}\n"));
-        out.push_str(&format!("{inner}    pub fn remove_key(self, key: K) -> ::hemx::advanced::Effect {{ self.slot.remove(key) }}\n"));
-        out.push_str(&format!("{inner}}}\n"));
-        out.push_str(&format!(
-            "{inner}impl<T> KeyedSlotTarget<::std::string::String, T, ()> {{\n"
-        ));
-        out.push_str(&format!("{inner}    pub fn append(self, view: impl ::hemplate::Hemplate + ::hemx::KeyedPartial) -> ::hemx::advanced::Effect {{ self.slot.append_html(view.hemx_key(), super::render(&view)) }}\n"));
-        out.push_str(&format!("{inner}    pub fn prepend(self, view: impl ::hemplate::Hemplate + ::hemx::KeyedPartial) -> ::hemx::advanced::Effect {{ self.slot.prepend_html(view.hemx_key(), super::render(&view)) }}\n"));
-        out.push_str(&format!("{inner}    pub fn replace(self, view: impl ::hemplate::Hemplate + ::hemx::KeyedPartial) -> ::hemx::advanced::Effect {{ self.slot.replace_html(view.hemx_key(), super::render(&view)) }}\n"));
-        out.push_str(&format!("{inner}    pub fn append_keyed(self, key: impl ::std::string::ToString, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ self.slot.append_html(key.to_string(), super::render(view)) }}\n"));
-        out.push_str(&format!("{inner}    pub fn prepend_keyed(self, key: impl ::std::string::ToString, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ self.slot.prepend_html(key.to_string(), super::render(view)) }}\n"));
-        out.push_str(&format!("{inner}    pub fn replace_keyed(self, key: impl ::std::string::ToString, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ self.slot.replace_html(key.to_string(), super::render(view)) }}\n"));
-        out.push_str(&format!("{inner}    pub fn remove(self, key: impl ::std::string::ToString) -> ::hemx::advanced::Effect {{ self.slot.remove(key.to_string()) }}\n"));
-        out.push_str(&format!("{inner}}}\n"));
-        for res in self
-            .slots
-            .values()
-            .filter(|res| component_matches(res, component))
-            .filter(|res| res.keyed)
-            .filter(|res| components.contains(&res.ident) && Some(res.ident.as_str()) != component)
-        {
-            let child = &res.ident;
-            out.push_str(&format!(
-                "{inner}impl<T> KeyedSlotTarget<::std::string::String, T, {child_prefix}{child}::Component> {{\n"
-            ));
-            out.push_str(&format!("{inner}    pub fn append(self, view: impl ::hemplate::Hemplate + ::hemx::KeyedPartial) -> ::hemx::advanced::Effect {{ self.slot.append_html(view.hemx_key(), {child_prefix}{child}::render(&view)) }}\n"));
-            out.push_str(&format!("{inner}    pub fn prepend(self, view: impl ::hemplate::Hemplate + ::hemx::KeyedPartial) -> ::hemx::advanced::Effect {{ self.slot.prepend_html(view.hemx_key(), {child_prefix}{child}::render(&view)) }}\n"));
-            out.push_str(&format!("{inner}    pub fn replace(self, view: impl ::hemplate::Hemplate + ::hemx::KeyedPartial) -> ::hemx::advanced::Effect {{ self.slot.replace_html(view.hemx_key(), {child_prefix}{child}::render(&view)) }}\n"));
-            out.push_str(&format!("{inner}    pub fn append_keyed(self, key: impl ::std::string::ToString, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ self.slot.append_html(key.to_string(), {child_prefix}{child}::render(view)) }}\n"));
-            out.push_str(&format!("{inner}    pub fn prepend_keyed(self, key: impl ::std::string::ToString, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ self.slot.prepend_html(key.to_string(), {child_prefix}{child}::render(view)) }}\n"));
-            out.push_str(&format!("{inner}    pub fn replace_keyed(self, key: impl ::std::string::ToString, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect {{ self.slot.replace_html(key.to_string(), {child_prefix}{child}::render(view)) }}\n"));
-            out.push_str(&format!("{inner}    pub fn remove(self, key: impl ::std::string::ToString) -> ::hemx::advanced::Effect {{ self.slot.remove(key.to_string()) }}\n"));
-            out.push_str(&format!("{inner}}}\n"));
-        }
-        out.push_str(&format!(
-            "{inner}impl<K: ::std::string::ToString, T, C> ::hemx::GeneratedTarget for KeyedSlotTarget<K, T, C> {{\n"
-        ));
-        out.push_str(&format!("{inner}    fn __hemx_resource_id(self) -> ::hemx::advanced::ResourceId {{ self.slot.id() }}\n"));
-        out.push_str(&format!("{inner}}}\n"));
         for res in self
             .slots
             .values()
             .filter(|res| component_matches(res, component))
         {
-            let marker = if components.contains(&res.ident) && Some(res.ident.as_str()) != component
-            {
-                format!("{child_prefix}{}::Component", res.ident)
-            } else {
-                "()".to_string()
-            };
-            if res.keyed {
-                out.push_str(&format!(
-                    "{inner}pub const {}: KeyedSlotTarget<::std::string::String, ::std::string::String, {marker}> = KeyedSlotTarget::new(super::advanced::slots::{});\n",
+            match res.role {
+                SlotRole::Slot => out.push_str(&format!(
+                    "{inner}pub const {}: SlotTarget<::std::string::String> = SlotTarget::new(super::advanced::slots::{});\n",
                     res.ident, res.ident
-                ));
-            } else {
-                out.push_str(&format!(
-                    "{inner}pub const {}: SlotTarget<::std::string::String, {marker}> = SlotTarget::new(super::advanced::slots::{});\n",
+                )),
+                SlotRole::Row => out.push_str(&format!(
+                    "{inner}pub const {}: KeyedSlotTarget<::std::string::String, ::std::string::String> = KeyedSlotTarget::new(super::advanced::slots::{});\n",
                     res.ident, res.ident
-                ));
+                )),
+                SlotRole::Collection => out.push_str(&format!(
+                    "{inner}pub const {}: CollectionTarget<::std::string::String> = CollectionTarget::new(super::advanced::slots::{}, ::hemx::advanced::KeyedSlot::new({}));\n",
+                    res.ident, res.ident, res.id
+                )),
             }
         }
         out.push_str(&format!("{pad}}}\n"));
@@ -655,16 +651,14 @@ impl Resources {
         indent: usize,
     ) {
         let pad = "    ".repeat(indent);
-        let table_name = match component {
-            Some(component) => format!("__HEMX_LOWERING_TABLE_{}", component.to_ascii_uppercase()),
-            None => "__HEMX_LOWERING_TABLE".to_string(),
-        };
+
+        // Authoring names are globally unique, so every render uses the complete table.
+        let table_prefix = if component.is_some() { "super::" } else { "" };
         out.push_str(&format!("\n{pad}pub fn lower(html: impl ::std::convert::AsRef<str>) -> ::std::string::String {{\n"));
         out.push_str(&format!("{pad}    "));
-        if component.is_some() {
-            out.push_str("super::");
-        }
-        out.push_str(&format!("__hemx_lower_html(html.as_ref(), {table_name})\n"));
+        out.push_str(&format!(
+            "{table_prefix}__hemx_lower_html(html.as_ref(), {table_prefix}__HEMX_LOWERING_TABLE)\n"
+        ));
         out.push_str(&format!("{pad}}}\n\n"));
         out.push_str(&format!("{pad}#[doc(hidden)]\n"));
         out.push_str(&format!("{pad}pub fn lower_html(html: impl ::std::convert::AsRef<str>) -> ::std::string::String {{ lower(html) }}\n\n"));
@@ -697,65 +691,41 @@ impl Resources {
         out.push_str(&format!("{pad}    slot.html(render(view))\n"));
         out.push_str(&format!("{pad}}}\n\n"));
         out.push_str(&format!("{pad}#[doc(hidden)]\n"));
-        out.push_str(&format!("{pad}pub fn append<K, T>(slot: ::hemx::advanced::KeyedSlot<K, T>, key: K, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect\n"));
-        out.push_str(&format!("{pad}where\n"));
-        out.push_str(&format!("{pad}    K: ::std::string::ToString,\n"));
-        out.push_str(&format!("{pad}{{\n"));
-        out.push_str(&format!("{pad}    slot.append_html(key, render(view))\n"));
-        out.push_str(&format!("{pad}}}\n\n"));
-        out.push_str(&format!("{pad}#[doc(hidden)]\n"));
-        out.push_str(&format!("{pad}pub fn prepend<K, T>(slot: ::hemx::advanced::KeyedSlot<K, T>, key: K, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect\n"));
-        out.push_str(&format!("{pad}where\n"));
-        out.push_str(&format!("{pad}    K: ::std::string::ToString,\n"));
-        out.push_str(&format!("{pad}{{\n"));
-        out.push_str(&format!("{pad}    slot.prepend_html(key, render(view))\n"));
-        out.push_str(&format!("{pad}}}\n\n"));
-        out.push_str(&format!("{pad}#[doc(hidden)]\n"));
         out.push_str(&format!("{pad}pub fn replace<K, T>(slot: ::hemx::advanced::KeyedSlot<K, T>, key: K, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect\n"));
         out.push_str(&format!("{pad}where\n"));
         out.push_str(&format!("{pad}    K: ::std::string::ToString,\n"));
         out.push_str(&format!("{pad}{{\n"));
         out.push_str(&format!("{pad}    slot.replace_html(key, render(view))\n"));
         out.push_str(&format!("{pad}}}\n\n"));
-        self.push_lowering_table(out, component, indent, &table_name);
+        if component.is_none() {
+            self.push_lowering_table(out);
+        }
     }
 
-    pub(super) fn push_lowering_table(
-        &self,
-        out: &mut String,
-        component: Option<&str>,
-        indent: usize,
-        name: &str,
-    ) {
-        let pad = "    ".repeat(indent);
-        out.push_str(&format!("{pad}const {name}: &[(&str, &str, u32)] = &[\n"));
-        for res in self
-            .slots
-            .values()
-            .filter(|res| component_matches(res, component))
-        {
+    pub(super) fn push_lowering_table(&self, out: &mut String) {
+        let pad = "";
+        out.push_str("const __HEMX_LOWERING_TABLE: &[(&str, &str, u32)] = &[\n");
+        for res in self.slots.values() {
+            let attr = if res.role == SlotRole::Collection {
+                "data-hemx-collection"
+            } else {
+                "data-hemx-slot"
+            };
             out.push_str(&format!(
-                "{pad}    (\"data-hemx-slot\", {}, {}),\n",
+                "    ({}, {}, {}),\n",
+                rust_str(attr),
                 rust_str(&res.ident),
                 res.id
             ));
         }
-        for res in self
-            .handles
-            .values()
-            .filter(|res| component_matches(res, component))
-        {
+        for res in self.handles.values() {
             out.push_str(&format!(
                 "{pad}    (\"data-hemx-handle\", {}, {}),\n",
                 rust_str(&res.ident),
                 res.id
             ));
         }
-        for form in self
-            .forms
-            .values()
-            .filter(|form| component_matches(&form.resource, component))
-        {
+        for form in self.forms.values() {
             let res = &form.resource;
             out.push_str(&format!(
                 "{pad}    (\"data-hemx-form\", {}, {}),\n",
@@ -772,7 +742,7 @@ fn __hemx_lower_html(html: &str, table: &[(&str, &str, u32)]) -> ::std::string::
     let mut out = html.to_owned();
     for (attr, name, id) in table {
         let runtime_attr = match *attr {
-            "data-hemx-slot" => "data-hemx-resource",
+            "data-hemx-slot" | "data-hemx-collection" => "data-hemx-resource",
             "data-hemx-handle" => "data-hemx-action",
             "data-hemx-form" => "data-hemx-resource",
             "data-hemx-revealed" => "data-hemx-revealed",
@@ -786,8 +756,8 @@ fn __hemx_lower_html(html: &str, table: &[(&str, &str, u32)]) -> ::std::string::
 }
 
 fn __hemx_replace_attr(mut html: ::std::string::String, attr: &str, name: &str, runtime_attr: &str, id: u32) -> ::std::string::String {
-    let replacement = if runtime_attr == "value" {
-        ::std::format!("{attr}=\"{name}\" {runtime_attr}=\"{id}\"")
+    let replacement = if attr == "data-hemx-collection" {
+        ::std::format!("{runtime_attr}=\"{id}\" data-hemx-collection=\"\"")
     } else {
         ::std::format!("{runtime_attr}=\"{id}\"")
     };
@@ -822,16 +792,21 @@ fn __hemx_inject_handle_inputs(html: ::std::string::String) -> ::std::string::St
         };
         let form_body_end = rest.find("</form>").unwrap_or(rest.len());
         let form_body = &rest[..form_body_end];
-        if !__hemx_has_handle_input(form_body) {
+        if !__hemx_has_field(form_body, "__h") {
             out.push_str(&::std::format!("<input type=\"hidden\" name=\"__h\" value=\"{}\">", handle_id));
+        }
+        // The page's build travels with the form so native and enhanced submissions
+        // are both checked against the server's build.
+        if !__hemx_has_field(form_body, "__b") {
+            out.push_str(&::std::format!("<input type=\"hidden\" name=\"__b\" value=\"{}\">", BUILD_FINGERPRINT.0));
         }
     }
     out.push_str(rest);
     out
 }
 
-fn __hemx_has_handle_input(html: &str) -> bool {
-    html.contains("name=\"__h\"") || html.contains("name='__h'")
+fn __hemx_has_field(html: &str, name: &str) -> bool {
+    html.contains(&::std::format!("name=\"{name}\"")) || html.contains(&::std::format!("name='{name}'"))
 }
 
 fn __hemx_attr(tag: &str, attr: &str) -> Option<::std::string::String> {
@@ -936,6 +911,7 @@ fn __hemx_attr(tag: &str, attr: &str) -> Option<::std::string::String> {
         for res in self.slots.values() {
             parts.push(0);
             parts.push(res.id);
+            parts.push(res.role.fingerprint_part());
         }
         for res in self.handles.values() {
             parts.push(1);
@@ -997,7 +973,7 @@ pub(super) fn make_resource(
         symbol,
         ident,
         component,
-        keyed: false,
+        role: SlotRole::Slot,
         id,
     })
 }
@@ -1149,55 +1125,20 @@ pub(super) fn class_ident(token: &str) -> Option<String> {
     rust_ident(&token.replace('-', "_"))
 }
 
+/// Handler parameters are explicit: only `data-hemx-param-*` becomes a request
+/// field, so ordinary `data-*` metadata never overrides form values.
+pub(super) const HANDLE_PARAM_PREFIX: &str = "data-hemx-param-";
+
 pub(super) fn is_handle_param_attr(attr: &SurfaceAttribute) -> bool {
     matches!(
         attr.origin,
         AttributeOrigin::Static | AttributeOrigin::Dynamic
-    ) && attr.name.starts_with("data-")
-        && !attr.name.starts_with("data-hemx-")
+    ) && attr.name.starts_with(HANDLE_PARAM_PREFIX)
 }
 
 pub(super) fn data_param_ident(name: &str) -> Option<String> {
-    let data_name = name.strip_prefix("data-")?;
-    rust_ident(&data_name.replace('-', "_"))
-}
-
-pub(super) fn can_host_keyed_collection(tag: &str) -> bool {
-    matches!(
-        tag,
-        "ul" | "ol" | "tbody" | "thead" | "tfoot" | "table" | "select" | "datalist"
-    )
-}
-
-pub(super) fn has_descendant_keyed_for_scope(surface: &SurfaceDocument, scope: ScopeId) -> bool {
-    surface.scopes.iter().enumerate().any(|(index, current)| {
-        matches!(
-            current.kind,
-            ScopeKind::For {
-                key_expr: Some(_),
-                ..
-            }
-        ) && is_descendant_scope(surface, ScopeId(index as u32), scope)
-    })
-}
-
-pub(super) fn is_descendant_scope(
-    surface: &SurfaceDocument,
-    mut scope: ScopeId,
-    ancestor: ScopeId,
-) -> bool {
-    loop {
-        let Some(current) = surface.scopes.get(scope.0 as usize) else {
-            return false;
-        };
-        let Some(parent) = current.parent else {
-            return false;
-        };
-        if parent == ancestor {
-            return true;
-        }
-        scope = parent;
-    }
+    let param = name.strip_prefix(HANDLE_PARAM_PREFIX)?;
+    rust_ident(&param.replace('-', "_"))
 }
 
 pub(super) fn is_inside_keyed_for(surface: &SurfaceDocument, mut scope: ScopeId) -> bool {
@@ -1227,6 +1168,9 @@ pub(super) fn unkeyed_generated_target_diagnostics(
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     for (node_scope, target) in generated_targets_with_scope(surface) {
+        if target.kind == "collection" {
+            continue;
+        }
         if let Some(diagnostic) = unkeyed_generated_target_diagnostic_for_scope(
             surface,
             node_scope,
@@ -1261,7 +1205,7 @@ pub(super) fn generated_targets_with_scope(
             let Some(kind) = attr.name.strip_prefix("data-hemx-") else {
                 continue;
             };
-            if !matches!(kind, "slot" | "form" | "handle") {
+            if !matches!(kind, "slot" | "collection" | "form" | "handle") {
                 continue;
             }
             let Some(name) = &attr.value else {

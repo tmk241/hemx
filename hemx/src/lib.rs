@@ -123,29 +123,13 @@ impl<T> RenderSlotExt for Slot<T> {
     }
 }
 
-/// Compatibility shim for raw keyed slot rendering.
+/// Render into an existing keyed row. Collection membership and order belong to a Slot's Rows.
 ///
-/// Prefer generated target objects such as `targets::row.append(&view)` so
+/// Prefer generated target objects such as `targets::row.replace(&view)` so
 /// generated resource lowering stays attached to the view boundary.
 #[doc(hidden)]
 pub trait RenderKeyedSlotExt<K> {
-    fn append(self, key: K, view: &impl hemplate::Hemplate) -> Effect;
-    fn prepend(self, key: K, view: &impl hemplate::Hemplate) -> Effect;
     fn replace(self, key: K, view: &impl hemplate::Hemplate) -> Effect;
-
-    fn append_view(self, key: K, view: &impl hemplate::Hemplate) -> Effect
-    where
-        Self: Sized,
-    {
-        self.append(key, view)
-    }
-
-    fn prepend_view(self, key: K, view: &impl hemplate::Hemplate) -> Effect
-    where
-        Self: Sized,
-    {
-        self.prepend(key, view)
-    }
 
     fn replace_view(self, key: K, view: &impl hemplate::Hemplate) -> Effect
     where
@@ -159,14 +143,6 @@ impl<K, T> RenderKeyedSlotExt<K> for KeyedSlot<K, T>
 where
     K: ToString,
 {
-    fn append(self, key: K, view: &impl hemplate::Hemplate) -> Effect {
-        self.append_html(key, render_template(view))
-    }
-
-    fn prepend(self, key: K, view: &impl hemplate::Hemplate) -> Effect {
-        self.prepend_html(key, render_template(view))
-    }
-
     fn replace(self, key: K, view: &impl hemplate::Hemplate) -> Effect {
         self.replace_html(key, render_template(view))
     }
