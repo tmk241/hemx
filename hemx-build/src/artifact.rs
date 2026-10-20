@@ -651,7 +651,6 @@ impl Resources {
         indent: usize,
     ) {
         let pad = "    ".repeat(indent);
-
         // Authoring names are globally unique, so every render uses the complete table.
         let table_prefix = if component.is_some() { "super::" } else { "" };
         out.push_str(&format!("\n{pad}pub fn lower(html: impl ::std::convert::AsRef<str>) -> ::std::string::String {{\n"));

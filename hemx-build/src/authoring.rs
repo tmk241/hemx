@@ -62,6 +62,7 @@ pub(super) fn known_hemx_attr(name: &str) -> bool {
             | "data-hemx-pending-class"
             | "data-hemx-indicator"
             | "data-hemx-confirm"
+            | "data-hemx-timeout"
             | "data-hemx-debounce"
             | "data-hemx-throttle"
             | "data-hemx-every"
@@ -143,6 +144,14 @@ pub(super) fn reject_invalid_hemx_attr_values(
                     "expected a non-negative number of viewports",
                 ));
             }
+            "data-hemx-timeout" if !valid_timeout(value) => {
+                return Err(invalid_hemx_value(
+                    path,
+                    &attr.name,
+                    value,
+                    "expected positive whole milliseconds like `250`/`250ms` or seconds like `120s`, within 1..2147483647ms",
+                ));
+            }
             "data-hemx-debounce" | "data-hemx-throttle" | "data-hemx-every"
             | "data-hemx-interval"
                 if !valid_duration(value) =>
@@ -182,7 +191,6 @@ pub(super) fn reject_invalid_hemx_attr_placement(
             ));
         }
     }
-
     if has_attr(attrs, "data-hemx-collection")
         && matches!(
             tag,
@@ -273,6 +281,28 @@ fn valid_duration(value: &str) -> bool {
         .or_else(|| value.strip_suffix('s'))
         .unwrap_or(value);
     !digits.is_empty() && digits.as_bytes().iter().all(u8::is_ascii_digit)
+}
+
+fn valid_timeout(value: &str) -> bool {
+    // Match the browser's String.trim: unlike Rust whitespace, it includes
+    // the byte-order mark and excludes NEXT LINE (U+0085).
+    let value =
+        value.trim_matches(|c: char| c == '\u{feff}' || (c.is_whitespace() && c != '\u{0085}'));
+    if !valid_duration(value) {
+        return false;
+    }
+    let (digits, multiplier) = if let Some(digits) = value.strip_suffix("ms") {
+        (digits, 1)
+    } else if let Some(digits) = value.strip_suffix('s') {
+        (digits, 1000)
+    } else {
+        (value, 1)
+    };
+    digits
+        .parse::<u32>()
+        .ok()
+        .and_then(|duration| duration.checked_mul(multiplier))
+        .is_some_and(|milliseconds| (1..=i32::MAX as u32).contains(&milliseconds))
 }
 
 fn invalid_hemx_value(path: &Path, attr: &str, value: &str, expectation: &str) -> io::Error {

@@ -180,7 +180,7 @@ async function observeStreamCases({ observe, root, waitFor, pause }) {
   }
 
   // 200 unfolded server events: the runtime must fold what arrives within one
-  // frame and touch the DOM far fewer than 200 times ().
+  // frame and touch the DOM far fewer than 200 times.
   await observe("streams-sse-burst", root('<p id="status" data-hemx-resource="1">0</p>').replace("<main ", '<main data-hemx-sse="/streams/burst" '), async (w, d) => {
     const status = d.querySelector("#status");
     let callbacks = 0;
@@ -190,7 +190,7 @@ async function observeStreamCases({ observe, root, waitFor, pause }) {
     return { text: status.textContent, callbacks, diagnostics: w.observed.diagnostics };
   });
 
-  // A replacement then a morph, applied in order, end in the new element ().
+  // A replacement then a morph, applied in order, end in the new element.
   await observe("streams-sse-patch-fold", root('<div data-hemx-resource="1">x</div>').replace("<main ", '<main data-hemx-sse="/streams/patch-fold" '), async (w, d) => {
     await waitFor(() => d.querySelector("[data-hemx-resource]")?.textContent === "done", "final patch");
     await pause(50);
@@ -199,7 +199,7 @@ async function observeStreamCases({ observe, root, waitFor, pause }) {
   });
 
   // 151 unfolded row deltas: folded per frame into chained deltas, they must
-  // reach the exact final order with few DOM updates (, ).
+  // reach the exact final order with few DOM updates.
   await observe("streams-sse-delta-burst", root('<ul data-hemx-resource="1" data-hemx-collection=""></ul>').replace("<main ", '<main data-hemx-sse="/streams/delta-burst" '), async (w, d) => {
     const list = d.querySelector("ul");
     let callbacks = 0;

@@ -1,3 +1,4 @@
+pub mod error_cases;
 mod lifecycle_cases;
 pub mod review_cases;
 mod wire_cases;
@@ -455,6 +456,7 @@ pub fn cases() -> Value {
     json!({
         "wire": wires,
         "review": review_cases::cases(),
+        "errors": error_cases::cases(),
         "wireBoundary": wire_cases::cases(),
         "lifecycle": lifecycle_cases::cases(),
         "keyed": keyed,

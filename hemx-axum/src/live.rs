@@ -1,4 +1,4 @@
-//! A live channel that never leaves a client with a gap (, ).
+//! A live channel that never leaves a client with a gap.
 //!
 //! Every published batch gets the next [`Cursor`]. A connection resumes from the
 //! cursor the browser last saw (`Last-Event-ID` on a reconnect, or the cursor the

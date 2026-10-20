@@ -1,0 +1,21 @@
+[package]
+name = "hemx-counter-example"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+hemplate = { version = "0.4.0", default-features = false, features = ["derive"] }
+hemx = { path = "../../hemx" }
+hemx-axum = { path = "../../hemx-axum" }
+tokio = { version = "1", features = ["macros", "net", "rt"] }
+
+[build-dependencies]
+hemx-build = { path = "../../hemx-build" }
+
+[dev-dependencies]
+scraper = "0.25"
+tower = { version = "0.5", features = ["util"] }

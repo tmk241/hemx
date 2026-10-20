@@ -109,7 +109,7 @@ fn validate_ref(reference: &ResourceRef) -> Result<(), WireError> {
     }
 }
 
-/// Structural Rows rules shared by encoding and decoding ().
+/// Structural Rows rules shared by encoding and decoding.
 fn validate_rows(order: &[String], rows: &[(String, SafeHtml)]) -> Result<(), WireError> {
     if order.len() > MAX_ROW_KEYS {
         return Err(WireError::TooManyRowKeys);
@@ -132,7 +132,7 @@ fn validate_rows(order: &[String], rows: &[(String, SafeHtml)]) -> Result<(), Wi
     Ok(())
 }
 
-/// Structural RowsDelta rules shared by encoding and decoding ().
+/// Structural RowsDelta rules shared by encoding and decoding.
 /// Whether steps apply depends on the client's rows and is checked there.
 fn validate_delta(steps: &[RowStep], rows: &[(String, SafeHtml)]) -> Result<(), WireError> {
     if steps.len() > MAX_ROW_KEYS || rows.len() > MAX_ROW_KEYS {

@@ -41,6 +41,23 @@ export interface EffectBatch {
   ops: Effect[];
 }
 
+/** Stable discriminants on the existing root-scoped hemx:error event. */
+export type HemxErrorCode =
+  | "HEMX_REQUEST_FAILED"
+  | "HEMX_STALE_BUILD"
+  | "HEMX_BATCH_FAILED"
+  | "HEMX_ROWS_DRIFT"
+  | "HEMX_UNSUPPORTED_ABI"
+  | "HEMX_RUNTIME_FAILED";
+
+export interface HemxErrorDetail {
+  code: HemxErrorCode;
+  /** Diagnostic text, not a translation key or a write-outcome guarantee. */
+  message: string;
+  /** HTTP status when available; null for failures without one. */
+  status: number | null;
+}
+
 export interface HemxRuntime {
   readonly runtimeAbiVersion: number;
   roots(): Element[];
@@ -51,6 +68,15 @@ export interface HemxRuntime {
 }
 
 declare global {
+  interface ElementEventMap {
+    "hemx:error": CustomEvent<HemxErrorDetail>;
+  }
+  interface DocumentEventMap {
+    "hemx:error": CustomEvent<HemxErrorDetail>;
+  }
+  interface WindowEventMap {
+    "hemx:error": CustomEvent<HemxErrorDetail>;
+  }
   interface Window {
     hemx: HemxRuntime;
   }

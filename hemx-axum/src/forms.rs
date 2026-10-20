@@ -15,12 +15,34 @@ pub struct InteractionForm {
     files: Vec<InteractionFile>,
 }
 
+/// Optional cumulative payload limits for multipart interaction extraction.
+///
+/// Install with `axum::Extension(MultipartLimits { text_bytes, file_bytes })`.
+/// `text_bytes` counts UTF-8 bytes of **all field names** plus text values;
+/// `file_bytes` counts file contents across all parts. Parts without a name are
+/// counted too, although they are not stored. Filenames, content types, other
+/// headers and multipart framing are excluded: keep Axum's `DefaultBodyLimit`
+/// for the whole request. A part with a filename (even an empty one) is a file.
+///
+/// Equality is allowed; excess returns `InteractionFormRejection::BodyTooLarge`
+/// (HTTP 413). Zero forbids bytes in that category. Accepted files still reside
+/// in memory: these are payload budgets, not streaming storage, a part-count
+/// limit or a hard process-memory ceiling. Without this extension extraction
+/// retains only the host's whole-body limit. URL-encoded requests are unaffected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MultipartLimits {
+    pub text_bytes: usize,
+    pub file_bytes: usize,
+}
+
 /// A validated hemx mutation request.
 ///
 /// Only `application/x-www-form-urlencoded` and `multipart/form-data` are
 /// accepted. Body size is intentionally host policy: apply Axum's
 /// [`axum::extract::DefaultBodyLimit`] (or a compatible request-body limit)
 /// to the mutation route; limit rejections become HTTP 413 before dispatch.
+/// Add [`MultipartLimits`] as a request extension for independent cumulative
+/// multipart text/name and file-content budgets while reading the body.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InteractionRequest {
     pub(super) form: InteractionForm,
@@ -128,30 +150,56 @@ impl InteractionForm {
         Self::from_parts(parse_urlencoded_pairs(body)?, Vec::new())
     }
 
-    pub async fn parse_multipart(
+    /// Parse an already-extracted body with its host whole-body limit.
+    ///
+    /// For route-configured [`MultipartLimits`] and Fetch Metadata checks, use
+    /// `InteractionForm` or `InteractionRequest` as the request extractor instead.
+    pub async fn parse_multipart(multipart: Multipart) -> Result<Self, InteractionFormRejection> {
+        Self::parse_multipart_with_limits(multipart, None).await
+    }
+
+    async fn parse_multipart_with_limits(
         mut multipart: Multipart,
+        mut remaining: Option<MultipartLimits>,
     ) -> Result<Self, InteractionFormRejection> {
         let mut fields = Vec::new();
         let mut files = Vec::new();
 
-        while let Some(field) = multipart.next_field().await.map_err(extractor_rejection)? {
-            let Some(name) = field.name().map(str::to_owned) else {
+        while let Some(mut field) = multipart.next_field().await.map_err(extractor_rejection)? {
+            if let Some(budget) = &mut remaining {
+                consume_budget(&mut budget.text_bytes, field.name().map_or(0, str::len))?;
+            }
+            let name = field.name().map(str::to_owned);
+            let is_file = field.file_name().is_some();
+            let mut bytes = Vec::new();
+            while let Some(chunk) = field.chunk().await.map_err(extractor_rejection)? {
+                // Check before copying or asking the parser for another chunk.
+                // The transport/parser may already have buffered incoming data.
+                if let Some(budget) = &mut remaining {
+                    let available = if is_file {
+                        &mut budget.file_bytes
+                    } else {
+                        &mut budget.text_bytes
+                    };
+                    consume_budget(available, chunk.len())?;
+                }
+                if name.is_some() {
+                    bytes.extend_from_slice(&chunk);
+                }
+            }
+            let Some(name) = name else {
                 continue;
             };
-            let file_name = field.file_name().map(str::to_owned);
-            let content_type = field.content_type().map(str::to_owned);
-            let bytes = field.bytes().await.map_err(extractor_rejection)?;
-
-            if file_name.is_some() {
+            if is_file {
                 files.push(InteractionFile {
                     name,
-                    file_name,
-                    content_type,
-                    bytes: bytes.to_vec(),
+                    file_name: field.file_name().map(str::to_owned),
+                    content_type: field.content_type().map(str::to_owned),
+                    bytes,
                 });
             } else {
-                let value = String::from_utf8(bytes.to_vec())
-                    .map_err(|_| InteractionFormRejection::InvalidBody)?;
+                let value =
+                    String::from_utf8(bytes).map_err(|_| InteractionFormRejection::InvalidBody)?;
                 fields.push((name, value));
             }
         }
@@ -269,10 +317,11 @@ where
         check_fetch_site(&request)?;
         match interaction_media_type(request.headers())? {
             InteractionMediaType::Multipart => {
+                let limits = request.extensions().get::<MultipartLimits>().copied();
                 let multipart = Multipart::from_request(request, state)
                     .await
                     .map_err(extractor_rejection)?;
-                Self::parse_multipart(multipart).await
+                Self::parse_multipart_with_limits(multipart, limits).await
             }
             InteractionMediaType::UrlEncoded => {
                 let bytes = Bytes::from_request(request, state)
@@ -324,6 +373,13 @@ fn interaction_media_type(
         Some("application/x-www-form-urlencoded") => Ok(InteractionMediaType::UrlEncoded),
         _ => Err(InteractionFormRejection::UnsupportedMediaType),
     }
+}
+
+fn consume_budget(remaining: &mut usize, bytes: usize) -> Result<(), InteractionFormRejection> {
+    *remaining = remaining
+        .checked_sub(bytes)
+        .ok_or(InteractionFormRejection::BodyTooLarge)?;
+    Ok(())
 }
 
 fn extractor_rejection(rejection: impl IntoResponse) -> InteractionFormRejection {
@@ -382,5 +438,23 @@ fn hex(byte: u8) -> Option<u8> {
         b'a'..=b'f' => Some(byte - b'a' + 10),
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn budgets_cannot_wrap_or_underflow() {
+        let mut remaining = usize::MAX;
+        consume_budget(&mut remaining, usize::MAX).unwrap();
+        assert_eq!(remaining, 0);
+        consume_budget(&mut remaining, 0).unwrap();
+        assert_eq!(
+            consume_budget(&mut remaining, 1),
+            Err(InteractionFormRejection::BodyTooLarge)
+        );
+        assert_eq!(remaining, 0);
     }
 }

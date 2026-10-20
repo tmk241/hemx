@@ -55,6 +55,9 @@ fn check_group(name: &str, failures: &mut Vec<String>, check: impl FnOnce()) {
 pub fn assert_report(report: &Value, origin: &str) {
     let mut checked = BTreeSet::new();
     let mut failures = Vec::new();
+    check_group("request deadlines", &mut failures, || {
+        crate::timeouts::assert_timeouts(report, &mut checked);
+    });
     check_group("runtime entrypoint", &mut failures, || {
         let observed = case(report, &mut checked, "runtime-entrypoint");
         assert_eq!(observed["abi"], hemx_js::RUNTIME_ABI_VERSION);
@@ -134,7 +137,7 @@ pub fn assert_report(report: &Value, origin: &str) {
         );
         assert_eq!(observed["text"], "A2D");
         // A delta moves, creates and reconciles exactly as declared, from the
-        // order the browser hashes itself ().
+        // order the browser hashes itself.
         let observed = case(report, &mut checked, "delta-apply");
         assert_eq!(observed["accepted"], true);
         assert_eq!(observed["ids"], json!(["c", "a", "d"]));
@@ -683,6 +686,9 @@ pub fn assert_report(report: &Value, origin: &str) {
     });
     check_group("wire boundaries", &mut failures, || {
         crate::wire_checks::assert_wire_report(report, &mut checked);
+    });
+    check_group("localized errors", &mut failures, || {
+        crate::errors::assert_errors(report, &mut checked);
     });
     check_group("native HTTP forms", &mut failures, || {
         crate::native_form_checks::assert_native_forms(report, &mut checked);

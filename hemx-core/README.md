@@ -40,7 +40,6 @@ Errors identify the failed contract without including field contents.
 ## Folding
 
 
-
 `fold_batches` coalesces consecutive declaration batches by concatenating
 **every operation in order**. `folds_into` permits the same run only when both
 batches have the same ABI and fingerprint and contain only `Patch`, `Rows`, or

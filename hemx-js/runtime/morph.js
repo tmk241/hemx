@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 // The correspondence and control snapshots live for one operation only. The DOM
 // remains the source of both server defaults and browser-owned control state.
 function createMorpher(dom, { ROOT, ISLAND, RESOURCE, KEY }, rootOf, updatePendingAttributes) {

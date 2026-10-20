@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["hemx", "hemx-core", "hemx-derive", "hemx-js", "hemx-axum", "hemx-build", "hemx-test", "tests/server-wasm", "tests/browser"]
+members = ["hemx", "hemx-core", "hemx-derive", "hemx-js", "hemx-axum", "hemx-build", "hemx-test", "tests/server-wasm", "tests/browser", "examples/counter"]
 
 [workspace.package]
 version = "0.5.0"

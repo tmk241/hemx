@@ -28,7 +28,7 @@
   const boundRoots = new WeakSet();
   const dragKeys = new WeakMap();
   const activeRequests = new Set();
-  const REQUEST_TIMEOUT_MS = 10_000;
+  const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
   const forms = createForms(dom, rootOf,
     (form, source) => handlesEvent(form, "submit") && Boolean(
       formHandleId(form) || (ownsSubmitter(form, source) && handleId(source)) ||
@@ -223,7 +223,6 @@
     if (id) data.set("__h", id);
     // Request fields are explicit: form controls plus data-hemx-param-*, and the
     // reserved __drag key for drops. Ordinary data-* stays DOM metadata.
-
     const dragKey = eventName === "drop" && dragKeys.get(rootOf(el));
     if (dragKey) data.set("__drag", dragKey);
     const PARAM = "data-hemx-param-";
@@ -280,17 +279,18 @@
 
   // A response from another build means this page is stale, whatever its status
   // (a stale form submission is answered 409). Report once; never replay.
-
-  function staleError() {
+  function staleError(status) {
     const error = new Error("hemx surface fingerprint mismatch; reload this page");
     error.stale = true;
+    error.code = "HEMX_STALE_BUILD";
+    error.status = status;
     return error;
   }
 
   function requireUsable(response, root) {
     if (!compatibleFingerprint(response, root)) {
       discard(response);
-      throw staleError();
+      throw staleError(response.status);
     }
     if (!response.ok) {
       discard(response);
@@ -300,6 +300,7 @@
 
   function httpError(response) {
     const error = new Error(`HTTP ${response.status}`);
+    error.code = "HEMX_REQUEST_FAILED";
     error.status = response.status;
     return error;
   }
@@ -314,6 +315,18 @@
     });
   }
 
+  // The outlet's default text is final before the event: an application can
+  // synchronously translate it without a later request catch overwriting it.
+  function reportError(root, error, code = "HEMX_RUNTIME_FAILED", message = String(error)) {
+    showError(root, error, root);
+    // DOMException.code is a legacy number (TimeoutError is 23), not one of
+    // our public diagnostic codes. Preserve only recognized Hemx codes.
+    const reportedCode = [
+      "HEMX_REQUEST_FAILED", "HEMX_STALE_BUILD", "HEMX_BATCH_FAILED",
+      "HEMX_ROWS_DRIFT", "HEMX_UNSUPPORTED_ABI", "HEMX_RUNTIME_FAILED",
+    ].includes(error.code) ? error.code : code;
+    emit(root, "hemx:error", { message, code: reportedCode, status: error.status || null });
+  }
 
   async function send(el, eventName, source = el, capture) {
     const owner = rootOf(el);
@@ -325,6 +338,8 @@
       const active = pending.get(target);
       const tail = queues.get(target);
       if ((active || tail) && policy === "drop") return;
+      // Capture policy with the submitted data, before replacing an active request.
+      const timeoutMs = requestTimeout(target);
       // Capture successful controls once, at submission, also for queued work.
       const { form, data, submission } = formDataFor(el, eventName, source, capture);
       const { action, method, enctype } = submission;
@@ -341,8 +356,8 @@
         if (!dom.isConnected(el) || dom.ownerDocument(el) !== document || rootOf(el) !== owner) return;
         const abort = new AbortController();
         const timeout = setTimeout(
-          () => abort.abort(new DOMException(`hemx request timed out after ${REQUEST_TIMEOUT_MS} ms`, "TimeoutError")),
-          REQUEST_TIMEOUT_MS,
+          () => abort.abort(new DOMException(`hemx request timed out after ${timeoutMs} ms`, "TimeoutError")),
+          timeoutMs,
         );
         activeRequests.add(abort);
         let finish;
@@ -383,9 +398,8 @@
         await queued;
       } else await execute();
     } catch (error) {
-      if (error.name !== "AbortError") {
-        showError(el, error, owner);
-        if (!error.hemxReported) emit(owner, "hemx:error", { message: String(error), status: error.status || null });
+      if (error.name !== "AbortError" && !error.hemxReported) {
+        reportError(owner, error, "HEMX_REQUEST_FAILED");
       }
     }
   }
@@ -418,9 +432,8 @@
       else if (mode === "replace") history.replaceState({ hemx: true }, "", href);
       return true;
     } catch (error) {
-      if (error.name !== "AbortError") {
-        showError(root, error, root);
-        if (!error.hemxReported) emit(root, "hemx:error", { message: String(error), status: error.status || null });
+      if (error.name !== "AbortError" && !error.hemxReported) {
+        reportError(root, error, "HEMX_REQUEST_FAILED");
       }
       return false;
     }
@@ -468,7 +481,7 @@
     }
     if (!compatibleFingerprint(response, root)) {
       discard(response);
-      throw staleError();
+      throw staleError(response.status);
     }
     const type = response.headers.get("content-type") || "";
     if (type.includes("text/html")) {
@@ -504,12 +517,12 @@
     try {
       return applyDecoded(decodeBatch(buffer), root);
     } catch (error) {
-      emit(scope, "hemx:error", { message: String(error), code: error.code || null });
+      reportError(scope, error, "HEMX_BATCH_FAILED");
       return false;
     }
   }
 
-  // Decoding has already checked every declaration's structure ();
+  // Decoding has already checked every declaration's structure;
   // effects then apply in order and stop at the first failure.
   function applyDecoded(batch, root) {
     const scope = root || document;
@@ -523,7 +536,7 @@
       return true;
     } catch (error) {
       if (error.code === DRIFT) recoverDrift(scope, root, error);
-      else emit(scope, "hemx:error", { message: String(error), code: error.code || null });
+      else reportError(scope, error, "HEMX_BATCH_FAILED");
       return false;
     }
   }
@@ -535,7 +548,6 @@
   function isDisableControl(el) {
     return isInputControl(el) || el instanceof HTMLButtonElement;
   }
-
 
   function clearField(scope, ref) {
     const controls = fieldTargets(scope, ref);
@@ -557,7 +569,7 @@
   }
 
   // A collection row is exactly one element of the current root, stamped with
-  // its key. Insertion and replacement share this shape (, ).
+  // its key. Insertion and replacement share this shape.
   function rowElement(nodes, ref, key, [action, adjective]) {
     const elements = nodes.filter(dom.element);
     if (elements.length !== 1 || nodes.some((node) => !dom.element(node) &&
@@ -576,7 +588,7 @@
   }
 
   // Without moveBefore a row can still be reinserted, unless that would lose
-  // browser state it holds (); then nothing changes.
+  // browser state it holds; then nothing changes.
   function stateError(key) {
     return new Error(`hemx row ${key} holds focus, a selection, a frame, media or an open dialog and cannot move without native moveBefore`);
   }
@@ -602,7 +614,6 @@
   // A collection holds exactly the declared keys in the declared order. Every
   // check runs before the first DOM change; retained rows keep their identity
   // and state, and only rows outside the stable order move natively.
-
   function applyRows(scope, op) {
     const container = collectionTarget(scope, op.target);
     if (!container) return missing(scope, op.target);
@@ -626,7 +637,7 @@
       if (!dom.canRelocate(container, live.get(key)) ||
           (supplied.has(key) && !dom.canRelocate(container, supplied.get(key)))) throw stateError(key);
     }
-    // Every reconciliation is checked before the first one runs ().
+    // Every reconciliation is checked before the first one runs.
     for (const [key, row] of supplied) if (live.has(key)) morphing.checkElement(live.get(key), row);
     // Commit: changed rows reconcile in place, absent rows go, then placement. A
     // row whose tag changed is a new element: placement must use that one.
@@ -647,11 +658,10 @@
     return true;
   }
 
-  // The order hash names a collection's key order (): FNV-1a 64 over
+  // The order hash names a collection's key order: FNV-1a 64 over
   // each key's UTF-8 bytes followed by 0xFF, exactly as hemx_core::order_hash.
   // Computed in 32-bit halves; the prime is 2^40 + 0x1b3.
   const utf8 = new TextEncoder();
-
   function orderHash(keys) {
     let hi = 0xcbf29ce4, lo = 0x84222325;
     const mix = (byte) => {
@@ -695,11 +705,10 @@
     forgetOrders([node, ...dom.query(node, `[${COLLECTION}]`)]);
   }
 
-  // A delta changes a collection from one named order to another ().
+  // A delta changes a collection from one named order to another.
   // At its `to` order it is a duplicate and is skipped; anywhere else but
   // `from` the client missed something and nothing changes. Every step is
-  // checked against the live rows and supplied HTML first ().
-
+  // checked against the live rows and supplied HTML first.
   function applyRowsDelta(scope, op) {
     const container = collectionTarget(scope, op.target);
     if (!container) return missing(scope, op.target);
@@ -799,17 +808,16 @@
   }
 
   // A client that missed an update heals by fetching its page again, once
-  // (). If the next delta still finds another order before any delta
+  // If the next delta still finds another order before any delta
   // applied, refetching will not help: report it instead of looping. Missing
   // capabilities (moveBefore) are not drift and never refetch.
   const DRIFT = "HEMX_ROWS_DRIFT";
   const drifted = new WeakMap();
-
   function recoverDrift(scope, root, error) {
     const state = drifted.get(scope);
     if (state === "healing") return;
     if (state === "healed") {
-      emit(scope, "hemx:error", { message: `${error.message}; reload to continue`, code: DRIFT });
+      reportError(scope, error, DRIFT, `${error.message}; reload to continue`);
       return;
     }
     drifted.set(scope, "healing");
@@ -841,7 +849,6 @@
       } else if (op.target.scope?.kind === "key" && !attrEquals(target, RESOURCE, op.target.resource.id)) {
         // A collection row is the keyed element itself: reconcile the rendered
         // row with it, as a Rows declaration would create it, never nest it.
-
         const nodes = morphing.parse(dom.parentNode(target), op.html);
         morphing.morphElement(target, rowElement(nodes, op.target, op.target.scope.value, ["replacement", "replacement"]));
       } else morphing.morph(target, op.html);
@@ -860,7 +867,7 @@
       if (!target) return missing(scope, op.target);
       dom.scrollIntoView(target, { block: op.block, behavior: op.behavior });
     } else if (op.kind === "visit") {
-      navigateUrl(op.url, scope, op.history).catch((error) => emit(scope, "hemx:error", String(error)));
+      navigateUrl(op.url, scope, op.history).catch((error) => reportError(scope, error, "HEMX_REQUEST_FAILED"));
     } else if (op.kind === "dispatch") {
       emit(scope, op.event, op.payload);
     }
@@ -868,6 +875,7 @@
   }
 
   function missing(root, target) {
+    showError(root, new Error("hemx effect target not found"), root);
     emit(root, "hemx:missing-target", target);
     return false;
   }
@@ -878,7 +886,7 @@
       if (!applied) emit(root, "hemx:missing-content-slot", null);
       return applied;
     } catch (error) {
-      emit(root, "hemx:error", { message: String(error) });
+      reportError(root, error);
       return false;
     }
   }
@@ -905,7 +913,6 @@
     }
     return null;
   }
-
 
   function updateHtml(html, root, title) {
     const scope = root || document;
@@ -1051,7 +1058,7 @@
         send(el, eventName, source, capture);
       } else send(el, eventName, source, capture);
     } catch (error) {
-      emit(owner, "hemx:error", { message: String(error) });
+      reportError(owner, error);
     }
   }
 
@@ -1169,7 +1176,6 @@
   // Drain once per frame, but preserve every operation and message boundary.
   // Even Morph A -> B -> A differs from just A for a dirty input. A failed
   // message stops its own effects, not the next independently received batch.
-
   const sseInbox = new WeakMap();
   function applySseMessage(root, event) {
     let inbox = sseInbox.get(root);
@@ -1188,8 +1194,16 @@
     try {
       inbox.push(decodeBatch(base64UrlBytes(event.data).buffer));
     } catch (error) {
-      emit(root, "hemx:error", { message: String(error), code: error.code || null });
+      reportError(root, error, "HEMX_BATCH_FAILED");
     }
+  }
+
+  function requestTimeout(target) {
+    const value = dom.attr(target, "data-hemx-timeout");
+    if (value === null) return DEFAULT_REQUEST_TIMEOUT_MS;
+    const ms = duration(value);
+    if (ms === 0) throw new Error("hemx data-hemx-timeout must be greater than zero");
+    return ms;
   }
 
   function duration(value) {
@@ -1267,7 +1281,7 @@
       throw new Error(`unknown hemx scope ${kind}`);
     };
     const ref = () => ({ resource: resource(), scope: scope() });
-    // Same structural rules as the Rust codec (, ).
+    // Same structural rules as the Rust codec.
     const rowsDeclaration = () => {
       const target = ref();
       const order = [];
@@ -1452,10 +1466,9 @@
 
   // The server is the truth for every history entry: refetch it, never restore
   // page HTML from history state (which would show stale server state).
-
   addEventListener("popstate", () => {
     const root = roots()[0];
-    if (root) navigateUrl(location.href, root, "none").catch((error) => emit(root, "hemx:error", String(error)));
+    if (root) navigateUrl(location.href, root, "none").catch((error) => reportError(root, error, "HEMX_REQUEST_FAILED"));
   });
 
   window.hemx = Object.freeze({

@@ -11,7 +11,7 @@ use axum::routing::post;
 use axum::{Extension, Router};
 use hemx_axum::{
     interactions, AllowSameSite, DispatchRejection, EffectResponse, InteractionForm,
-    InteractionRequest, HEMX_FINGERPRINT_HEADER,
+    InteractionRequest, MultipartLimits, HEMX_FINGERPRINT_HEADER,
 };
 use hemx_core::{BuildFingerprint, Handle, Slot};
 use tower::ServiceExt;
@@ -185,4 +185,69 @@ async fn same_origin_user_initiated_and_header_free_requests_pass() {
         assert_eq!(response.status(), StatusCode::OK, "{site:?}");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "{site:?}");
     }
+}
+
+fn multipart_submit(build: Option<&str>, site: &str) -> Request<Body> {
+    let mut body = String::from("--X\r\nContent-Disposition: form-data; name=\"__h\"\r\n\r\n7\r\n");
+    if let Some(build) = build {
+        body.push_str(&format!(
+            "--X\r\nContent-Disposition: form-data; name=\"__b\"\r\n\r\n{build}\r\n"
+        ));
+    }
+    body.push_str("--X\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"clip.glb\"\r\n\r\nfile\r\n--X--\r\n");
+    Request::post("/mutate")
+        .header(header::CONTENT_TYPE, "multipart/form-data; boundary=X")
+        .header("sec-fetch-site", site)
+        .body(Body::from(body))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn bounded_multipart_preserves_fetch_metadata_and_build_guards() {
+    for (build, site, opt_in, expected) in [
+        (Some("77"), "cross-site", false, StatusCode::FORBIDDEN),
+        (Some("77"), "cross-site", true, StatusCode::FORBIDDEN),
+        (Some("77"), "same-site", false, StatusCode::FORBIDDEN),
+        (Some("77"), "same-site", true, StatusCode::OK),
+        (Some("77"), "same-origin", false, StatusCode::OK),
+        (Some("76"), "same-origin", false, StatusCode::CONFLICT),
+        (None, "same-origin", false, StatusCode::CONFLICT),
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut router = app(&calls).layer(Extension(MultipartLimits {
+            text_bytes: 32,
+            file_bytes: 4,
+        }));
+        if opt_in {
+            router = router.layer(Extension(AllowSameSite));
+        }
+        let response = router.oneshot(multipart_submit(build, site)).await.unwrap();
+        assert_eq!(response.status(), expected, "{build:?}/{site}/{opt_in}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            usize::from(expected.is_success())
+        );
+    }
+}
+
+#[tokio::test]
+async fn cross_site_multipart_is_rejected_without_polling_its_body() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let body = Body::from_stream(futures_util::stream::poll_fn(
+        |_| -> std::task::Poll<Option<Result<Vec<u8>, std::convert::Infallible>>> {
+            panic!("cross-site multipart body was polled");
+        },
+    ));
+    let mut request = multipart_submit(Some("77"), "cross-site");
+    *request.body_mut() = body;
+    let response = app(&calls)
+        .layer(Extension(MultipartLimits {
+            text_bytes: 0,
+            file_bytes: 0,
+        }))
+        .oneshot(request)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }

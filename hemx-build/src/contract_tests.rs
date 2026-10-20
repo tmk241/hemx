@@ -11,6 +11,99 @@ fn inspect(source: &str) -> io::Result<Resources> {
 }
 
 #[test]
+fn timeout_static_values_fail_build_with_source_diagnostics() {
+    let base =
+        std::env::temp_dir().join(format!("hemx-build-timeout-invalid-{}", std::process::id()));
+    let templates = base.join("templates");
+    let out = base.join("out");
+    std::fs::create_dir_all(&templates).unwrap();
+    let path = templates.join("timeout.heml");
+    for value in [
+        None,
+        Some(""),
+        Some(" "),
+        Some("0"),
+        Some("0ms"),
+        Some("0s"),
+        Some("1.5s"),
+        Some("1.0ms"),
+        Some("1sec"),
+        Some("1MS"),
+        Some("ms"),
+        Some("-1"),
+        Some("+1"),
+        Some("1 ms"),
+        Some("\u{0085}1000ms"),
+        Some("1000ms\u{0085}"),
+        Some("١"),
+        Some("2147483648"),
+        Some("2147483648ms"),
+        Some("2147484s"),
+        Some("18446744073709551616ms"),
+        Some("18446744073709551615s"),
+    ] {
+        let attr = value.map_or_else(
+            || "data-hemx-timeout".to_owned(),
+            |value| format!(r#"data-hemx-timeout="{value}""#),
+        );
+        std::fs::write(
+            &path,
+            format!(r#"<form data-hemx-handle="save" {attr}></form>"#),
+        )
+        .unwrap();
+        let error = app()
+            .template_dir(&templates)
+            .out_dir(&out)
+            .run()
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{}: invalid data-hemx-timeout value `{}`; expected positive whole milliseconds like `250`/`250ms` or seconds like `120s`, within 1..2147483647ms",
+                path.display(),
+                value.unwrap_or("")
+            )
+        );
+    }
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn timeout_static_boundaries_and_dynamic_values_are_allowed() {
+    for attr in [
+        "",
+        r#"data-hemx-timeout="1""#,
+        r#"data-hemx-timeout="1ms""#,
+        r#"data-hemx-timeout="1s""#,
+        r#"data-hemx-timeout="120s""#,
+        r#"data-hemx-timeout=" 120s ""#,
+        "data-hemx-timeout=\"\u{feff}1000ms\u{feff}\"",
+        r#"data-hemx-timeout="0001ms""#,
+        r#"data-hemx-timeout="2147483647""#,
+        r#"data-hemx-timeout="2147483647ms""#,
+        r#"data-hemx-timeout="2147483s""#,
+        r#"+data-hemx-timeout="self.timeout""#,
+    ] {
+        for tag in ["form", "button"] {
+            let source = format!(r#"<{tag} data-hemx-handle="save" {attr}></{tag}>"#);
+            assert!(inspect(&source).is_ok(), "rejected {source}");
+        }
+    }
+    // The stricter timeout bounds must not change existing duration attributes.
+    for attr in ["debounce", "throttle", "every", "interval"] {
+        for value in ["0", "2147483648ms", "18446744073709551616s"] {
+            let source =
+                format!(r#"<button data-hemx-handle="save" data-hemx-{attr}="{value}"></button>"#);
+            assert!(
+                inspect(&source).is_ok(),
+                "rejected legacy duration {source}"
+            );
+        }
+    }
+}
+
+#[test]
 fn slot_roles_are_explicit_and_conflicts_fail_closed() {
     for (source, role) in [
         (
@@ -174,7 +267,7 @@ fn generated_composition_and_collection_capabilities_execute_against_real_crates
         ),
         (
             "grandchild",
-            r#"<section data-hemx-slot="grandchild_text"><form data-hemx-form="editor" data-hemx-handle="save"><button>Save</button></form></section>"#,
+            r#"<section data-hemx-slot="grandchild_text"><form data-hemx-form="editor" data-hemx-handle="save" data-hemx-timeout="120s"><button>Save</button></form></section>"#,
         ),
     ] {
         std::fs::write(templates.join(format!("{name}.heml")), source).unwrap();
@@ -270,7 +363,7 @@ impl Hemplate for Child {{
 }}
 impl Hemplate for Grandchild {{
     fn render_into(&self, out: &mut dyn std::fmt::Write) -> Result<(), hemplate::RenderError> {{
-        out.write_str("<section data-hemx-slot='grandchild_text'><form data-hemx-form='editor' data-hemx-handle='save'><button>Save</button></form></section>")?;
+        out.write_str("<section data-hemx-slot='grandchild_text'><form data-hemx-form='editor' data-hemx-handle='save' data-hemx-timeout='120s'><button>Save</button></form></section>")?;
         Ok(())
     }}
 }}
@@ -279,6 +372,7 @@ fn assert_lowered(html: &str) {{
     assert!(html.contains(&format!("data-hemx-resource=\"{{}}\"", ui::child::child_text.__hemx_resource_id().id)));
     assert!(html.contains(&format!("data-hemx-resource='{{}}'", ui::grandchild::grandchild_text.__hemx_resource_id().id)));
     assert!(html.contains(&format!("data-hemx-action='{{}}'", ui::grandchild::save.id().id)));
+    assert!(html.contains("data-hemx-timeout='120s'"));
     assert!(!html.contains("data-hemx-slot="));
     assert!(!html.contains("data-hemx-handle="));
     assert!(!html.contains("data-hemx-form="));

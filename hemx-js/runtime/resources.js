@@ -1,5 +1,3 @@
-
-
 // Resource references are exact metadata, not selectors or first-match queries.
 function createResources(dom, { ROOT, ISLAND, RESOURCE, COLLECTION, KEY, ACTION }) {
   function rootOf(node) {
@@ -81,7 +79,6 @@ function createResources(dom, { ROOT, ISLAND, RESOURCE, COLLECTION, KEY, ACTION 
 
   // A key on a Rows target scopes one collection instance; row keys never
   // participate in finding the collection itself.
-
   function collectionTarget(scope, ref) {
     if (ref.resource.kind !== "slot" || (ref.scope && ref.scope.kind !== "key")) {
       throw new Error("hemx Rows require a slot destination");

@@ -61,7 +61,7 @@ async function observeRuntimeCases({ observe, root, waitFor, pause }) {
       path: w.location.pathname, historyDelta: w.history.length - history, title: d.title,
       content: d.querySelector("#content").textContent, nav: d.querySelector("nav").textContent,
     };
-    // No page HTML may be stored in history ().
+    // No page HTML may be stored in history.
     const storedState = JSON.stringify(w.history.state);
     w.history.back();
     // The server's current page one differs from what was first rendered, so

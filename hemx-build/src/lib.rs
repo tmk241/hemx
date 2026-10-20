@@ -2425,7 +2425,7 @@ fn main() {{
     assert!(html.contains(r#"aria-describedby="title-error""#));
     assert!(html.contains(r#"id="title-error">Required"#));
     assert!(html.contains(r#"name="__h""#));
-    // Only the handled form carries the build; the GET search form does not.
+    // only the handled form carries the build; the GET search form does not.
     let build = format!(r#"<input type="hidden" name="__b" value="{{}}">"#, BUILD_FINGERPRINT.0);
     assert_eq!(BUILD_FINGERPRINT.0, 4242);
     assert_eq!(html.matches(&build).count(), 1, "{{html}}");

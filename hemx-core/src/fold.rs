@@ -1,4 +1,4 @@
-//! Lossless coalescing of declarations ().
+//! Lossless coalescing of declarations.
 //!
 //! Even repeated declarations can affect retained DOM and unsent form state.
 //! Coalescing therefore preserves every operation in order, without inspecting

@@ -2,8 +2,8 @@
 (async () => {
   const results = {};
   const pause = (ms = 0) => new Promise(resolve => setTimeout(resolve, ms));
-  async function waitFor(predicate, description) {
-    const deadline = performance.now() + 2000;
+  async function waitFor(predicate, description, timeoutMs = 2000) {
+    const deadline = performance.now() + timeoutMs;
     while (!predicate()) {
       if (performance.now() >= deadline) throw new Error(`timed out waiting for ${description}`);
       await pause(5);
@@ -180,7 +180,7 @@
     }
 
     // A row whose tag changes is a new element; the row placed next to it must
-    // still find it (, ).
+    // still find it.
     const lone = '<ul data-hemx-resource="1" data-hemx-collection=""><li id="b" data-hemx-key="b">B</li></ul>';
     for (const name of ["rows-retag", "delta-retag"]) {
       await observe(name, root(lone), (w, d) => {
@@ -194,7 +194,7 @@
       });
     }
 
-    // One unusable row among valid ones: nothing may change at all ().
+    // One unusable row among valid ones: nothing may change at all.
     for (const name of ["rows-preflight", "delta-preflight"]) {
       await observe(name, root(abc), (w, d) => {
         const list = d.querySelector("ul");
@@ -210,14 +210,14 @@
       });
     }
 
-    // A leading U+FEFF belongs to the key; decoding must not drop it ().
+    // A leading U+FEFF belongs to the key; decoding must not drop it.
     await observe("delta-bom", root('<ul data-hemx-resource="1" data-hemx-collection=""><li id="x" data-hemx-key="\ufeffx">X</li><li id="a" data-hemx-key="a">A</li></ul>'), (w, d) => {
       const accepted = apply(w, d, "delta-bom");
       return { accepted, diagnostics: w.observed.diagnostics.length, ids: Array.from(d.querySelector("ul").children, node => node.id) };
     });
 
     // Only a delta that applied clears the heal guard: not a skipped duplicate, and
-    // not a refetch that finishes after one did ().
+    // not a refetch that finishes after one did.
     const healedPage = (ids) => root(`<ul data-hemx-resource="1" data-hemx-collection="">${ids.map(id => `<li id="${id}" data-hemx-key="${id}">${id.toUpperCase()}</li>`).join("")}</ul>`);
     await observe("delta-heal-skip", root(abc), async (w, d) => {
       apply(w, d, "delta-drift");
@@ -251,7 +251,7 @@
       };
     });
 
-    // A drifted client refetches its page once (). The page either
+    // A drifted client refetches its page once. The page either
     // brings the missed rows, or, if it still disagrees, the next drift is
     // reported instead of refetched again.
     for (const [name, healed] of [["delta-heal", true], ["delta-heal-repeat", false]]) {
@@ -282,7 +282,7 @@
 
     // Moving row a to the end, natively or (without moveBefore, as in Safari)
     // by reinsertion, which is allowed only when row a holds no browser state
-    // that reinsertion would lose (). Both the delta path and the
+    // that reinsertion would lose. Both the delta path and the
     // morph path decide the same way.
     const rowA = {
       plain: '<li id="a" data-hemx-key="a"><input value="server"></li>',
@@ -674,6 +674,8 @@
       }, cases.generatedFingerprint);
     }
     const helpers = { observe, fixture, root, apply, cases, waitFor, pause };
+    await observeErrors(helpers);
+    await observeTimeouts(helpers);
     await observeRuntimeCases(helpers);
     await observeFormAdmission(helpers);
     await observeWireCases(helpers);

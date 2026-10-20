@@ -10,8 +10,6 @@ also exports application-wide aliases.
 ## Slots, rows, and collections
 
 
-
-
 Declare collections explicitly, including initially empty ones:
 
 ```html
@@ -81,9 +79,6 @@ addresses the collection resource and carries row keys separately; explicit row
 resources retain their own generated IDs.
 
 ## Composed rendering and determinism
-
-
-
 
 
 All generated rendering helpers use one complete application lowering table,

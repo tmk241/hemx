@@ -78,9 +78,8 @@ function nativeDOM() {
   // and inserted again. It stays the same node with its control values, but
   // loses focus, selection, frame documents, playing media, open dialogs and
   // popovers, and fullscreen. That loss must never happen silently, so only a
-  // row holding none of them may be reinserted ().
+  // row holding none of them may be reinserted.
   const stateful = "iframe, frame, embed, object, audio, video, dialog[open]";
-
   dom.holdsState = (node) => {
     if (!dom.element(node)) return false;
     const doc = dom.ownerDocument(node);

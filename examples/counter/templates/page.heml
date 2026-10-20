@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Hemx counter</title>
+    <script src="{+ self.runtime +}" defer></script>
+  </head>
+  <body>
+    <main data-hemx-root>
+      <h1>Hemx counter</h1>
+      <p>Count: <output data-hemx-slot="count" aria-live="polite">{+ self.count +}</output></p>
+      <form action="/increment" method="post" data-hemx-form="increment_form" data-hemx-handle="increment" data-hemx-policy="queue">
+        <label for="amount">Amount to add (0–255)</label>
+        <input id="amount" name="amount" type="number" min="0" max="255" value="1" required>
+        <button type="submit">Add</button>
+      </form>
+      <p data-hemx-error role="alert"></p>
+      <p><a href="/">Reload the current count</a></p>
+      <p>This demonstration shares one in-memory counter. Restarting the server resets it.</p>
+    </main>
+  </body>
+</html>

@@ -1,4 +1,4 @@
-//! Row orders as named states (, ).
+//! Row orders as named states.
 //!
 //! A collection's state is its key order. An [`order_hash`] names that state,
 //! so a [`Effect::RowsDelta`] can say which state it starts from and which it

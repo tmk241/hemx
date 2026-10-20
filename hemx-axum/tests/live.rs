@@ -1,5 +1,5 @@
 //! The live channel resumes by replay or starts from a snapshot, never leaving a
-//! gap or repeating a batch (), and encodes each batch once ().
+//! gap or repeating a batch, and encodes each batch once.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

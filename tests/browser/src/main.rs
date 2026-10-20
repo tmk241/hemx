@@ -1,4 +1,5 @@
 mod checks;
+mod errors;
 mod form_checks;
 mod lifecycle_checks;
 mod native_form_checks;
@@ -7,6 +8,7 @@ mod review_checks;
 mod runtime_checks;
 mod stream_checks;
 mod streams;
+mod timeouts;
 mod wire_checks;
 
 use std::sync::{Arc, Mutex};
@@ -106,6 +108,12 @@ async fn main() -> Result<(), Error> {
             }
             Ok(([(header::CONTENT_TYPE, "text/event-stream")], body))
         }))
+        .route("/timeouts-probe.js", get(|| async {
+            ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../timeouts-probe.js"))
+        }))
+        .route("/errors-probe.js", get(|| async {
+            ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../errors-probe.js"))
+        }))
         .route("/cases", get(cases))
         .route("/results", post(report))
         .route("/wire-probe.js", get(|| async {
@@ -122,6 +130,8 @@ async fn main() -> Result<(), Error> {
         }))
         .with_state(probe)
         .merge(native_forms::routes())
+        .merge(errors::routes())
+        .merge(timeouts::routes())
         .merge(streams.routes());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let origin = format!("http://{}", listener.local_addr()?);

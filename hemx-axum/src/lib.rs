@@ -15,7 +15,10 @@ use std::pin::Pin;
 mod forms;
 mod live;
 
-pub use forms::{Form, FromInteractionForm, InteractionFile, InteractionForm, InteractionRequest};
+pub use forms::{
+    Form, FromInteractionForm, InteractionFile, InteractionForm, InteractionRequest,
+    MultipartLimits,
+};
 pub use live::{Cursor, Live, Resume};
 
 pub const HEMX_PARTIAL_HEADER: &str = "x-hemx-partial";
@@ -1364,7 +1367,7 @@ impl<B: Borrow<EffectBatch>> Borrow<EffectBatch> for Frame<B> {
 }
 
 /// Batches waiting for the client are coalesced within the wire budget
-/// (). Every intermediate operation remains in order; only envelopes
+/// Every intermediate operation remains in order; only envelopes
 /// are combined. Side effects and differing builds remain separate frames.
 struct Folding<S, B> {
     inner: Pin<Box<S>>,

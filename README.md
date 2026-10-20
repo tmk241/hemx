@@ -31,21 +31,48 @@ async fn add_todo(app: App, form: hemx::Form<NewTodo>) -> impl hemx::IntoEffect 
 <ul data-hemx-collection="rows"></ul>
 ```
 
+
 This excerpt uses a `todos.heml` template, application state `App`, and an
 application-defined `TodoRow` implementing `Hemplate` and `hemx::KeyedPartial`.
 Effects declare state rather than issue commands. A collection either receives
 its complete content (`set`) or a transition from one key order to the next
 (`transition(&before, &after, &changed)`): only the steps between the two
 orders and the changed rows travel, and the browser applies them only when its
-rows are in the `before` order. Applying either twice changes nothing, so a
-newer declaration may replace an unsent older one. Keyed row targets replace
-one existing row; ordinary slots remain HTML/text update hosts. Generated
-rendering helpers lower the complete resource table, including nested
-components.
+rows are in the `before` order. A delta already at its resulting order is
+skipped. Merging preserves every intermediate operation in order: an intervening
+update can affect unsent form values even when the final defaults look the same.
+Never discard an unsent declaration in favor of a newer one. Keyed row targets
+replace one existing row; ordinary slots remain HTML/text update hosts. Generated
+rendering helpers lower the complete resource table, including nested components.
 
 Wire ABI and runtime ABI are version 3; the surface schema is version 2.
 Encoding is fallible: `batch.to_wire()?` rejects incompatible or oversized
 batches before emitting bytes. Earlier wire ABIs are rejected, not translated.
+
+## Run a complete example
+
+
+The [Axum + Hemplate counter](examples/counter/README.md) has one template,
+generated typed form/resource/handle APIs, the actual browser runtime, and one
+mutation path for enhanced effects and native form redirects:
+
+```console
+cargo run -p hemx-counter-example -j4
+# Open http://127.0.0.1:3000; Ctrl-C to stop.
+cargo test -p hemx-counter-example -j4
+```
+
+Run from this repository with its Hemplate checkout. The example binds loopback
+only and uses shared process-local state, not production authentication or
+storage. Disable JavaScript to try the native fallback.
+
+Use the **generated** `heml::page::render(&view)` (where `page` is the template
+module), then `hemx_axum::PageResponse::full(..).fingerprint(heml::BUILD_FINGERPRINT)`.
+Generated rendering lowers the complete resource/handle table and adds native
+form hidden fields; the Axum response stamps the root build marker. Raw
+`Hemplate::render` alone does not lower those authoring names and is not the
+normal Hemx rendering path. The example also shows the async Axum wrapper for
+`runtime_js()` and typed `RuntimeScript` template interpolation.
 
 ## Migrating from 0.4 to 0.5
 

@@ -256,10 +256,10 @@ async fn burst() -> impl IntoResponse {
 
 /// 151 unfolded row deltas: append k1..k100, remove the 50 odd keys, then move
 /// k100 to the front. The runtime folds what arrives within one frame into one
-/// chained delta () and must still reach the exact final order.
+/// chained delta and must still reach the exact final order.
 /// A replacement then a morph of the same region, sent unfolded. Applied one
 /// after the other they end in the replacement element holding "done"; folding
-/// them into the morph alone would leave the original element ().
+/// them into the morph alone would leave the original element.
 async fn patch_fold() -> impl IntoResponse {
     let slot = ResourceRef::unscoped(ResourceId {
         kind: ResourceKind::Slot,

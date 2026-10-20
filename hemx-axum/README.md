@@ -17,7 +17,6 @@ stream. It does not invent an error-event protocol; applications decide how to
 recover from a failed connection. Already-sent events cannot be recalled.
 
 
-
 When a client reads slower than updates arrive, `sse(stream)` coalesces waiting
 batches using the core folding rules: batches with the same ABI and fingerprint
 and no side effects may share one frame, with **every operation preserved in
@@ -38,7 +37,6 @@ send a `set` declaration of every collection it shows, or a `Visit` when that
 would exceed the batch budget.
 
 ## Including the runtime
-
 
 
 Serve the browser runtime with `runtime_js()` at `runtime_js_route_path()` and
@@ -155,6 +153,51 @@ automatically replays it as a native POST**: the server may already have mutated
 The application must offer an explicit recovery action and use its own
 idempotency policy where retrying a mutation is appropriate.
 
+## Bounded multipart input
+
+
+Keep Axum's whole-request limit. Add `MultipartLimits` when text/name bytes and
+file contents need separate cumulative budgets:
+
+```rust,no_run
+use axum::{extract::DefaultBodyLimit, routing::MethodRouter, Extension, Router};
+use hemx_axum::MultipartLimits;
+
+// Pass your POST route using the normal InteractionRequest extractor.
+fn upload_router(upload: MethodRouter) -> Router {
+    Router::new()
+        .route("/upload", upload)
+        .layer(DefaultBodyLimit::max(66 * 1024 * 1024))
+        .layer(Extension(MultipartLimits {
+            text_bytes: 1024 * 1024,
+            file_bytes: 64 * 1024 * 1024,
+        }))
+}
+```
+
+`text_bytes` includes every field name (including file names **as form keys**,
+`__h` and `__b`) plus text values, measured in UTF-8 bytes. `file_bytes` sums
+contents across every file part. Parts without a form name count too, although
+Hemx does not store them. A part with a filename, including `filename=""`, is a
+file. Filename metadata, content types, other headers and boundaries count only
+against the whole-body limit. Equality is allowed; zero permits no bytes in its
+category. Without the extension the existing whole-body limit remains the only
+size policy. URL-encoded requests are unaffected by `MultipartLimits`.
+
+Excess returns `InteractionFormRejection::BodyTooLarge` (HTTP 413) as soon as a
+field name or delivered chunk exceeds its remaining budget: Hemx neither copies
+that chunk into its payload buffer nor requests the next chunk. It does not wait
+for EOF. The original request headers and extensions stay intact, including
+Fetch Metadata, `AllowSameSite` and Axum's body-limit configuration.
+
+Accepted files are still buffered in memory. This is bounded reading, **not** a
+streaming file sink or a hard heap limit: the transport/parser may buffer data,
+and allocations and per-part metadata have overhead. File count, file-format
+validation, concurrency and storage policy remain application responsibilities.
+Use the normal `InteractionRequest` or `InteractionForm` extractor; manually
+extracting `Multipart` and calling `parse_multipart` does not apply the extension.
+There is no reason to serialize a parsed upload into another multipart request.
+
 ## Interaction integrity
 
 Two checks run before an application handler can mutate anything. Neither is an
@@ -185,7 +228,7 @@ form without the runtime receives the plain 409 text; render your own reload pag
 if that matters. A 409 without the server's fingerprint header is treated as an
 ordinary application conflict.
 
-Both checks were added in Hemx 0.5.
+Both checks are unreleased: Hemx 0.4.0 applies neither.
 
 ## License
 
