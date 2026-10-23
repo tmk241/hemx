@@ -23,6 +23,18 @@ struct Page {
     runtime: RuntimeScript,
 }
 
+// A presentational child is an ordinary Hemplate view, not a handler component.
+#[derive(Hemplate)]
+struct CounterValue {
+    count: u64,
+}
+
+impl CounterValue {
+    fn new(count: u64) -> Self {
+        Self { count }
+    }
+}
+
 // The generated decoder validates the required integer's 0–255 range on the
 // server too; native HTML constraints alone are not an input boundary.
 #[hemx::form("increment_form")]
@@ -36,7 +48,7 @@ struct Increment {
 fn increment(counter: Counter, form: Form<Increment>) -> impl hemx::IntoEffect {
     let mut count = counter.lock().expect("counter lock poisoned");
     *count += u64::from(form.amount);
-    heml::page::count.text(*count)
+    heml::counter_value::count.text(*count)
 }
 
 /// Construct a fresh demonstration application. All its clients share one count.

@@ -1,6 +1,6 @@
 # Axum + Hemplate counter
 
-One template, one generated action, one server-owned counter. No JavaScript
+One page with a nested component, one generated action, one server-owned counter. No JavaScript
 application code, database, external service, or authentication integration.
 
 From the repository root (Rust 1.91+ and the workspace's Hemplate checkout):
@@ -25,7 +25,8 @@ cargo test -p hemx-counter-example -j4
 
 
 - [`build.rs`](build.rs) runs `hemx-build` against
-  [`templates/page.heml`](templates/page.heml). `#[hemx::surface]` includes the
+  [`templates/page.heml`](templates/page.heml) and
+  [`templates/counter_value.heml`](templates/counter_value.heml). `#[hemx::surface]` includes the
   generated typed resources and handle. `#[hemx::form]` binds the `amount: u8`
   model to the template's form, validating required integer input on the server,
   not just with the browser's `min`/`max` attributes.
@@ -35,6 +36,14 @@ cargo test -p hemx-counter-example -j4
   hidden `__h` and build `__b`. Raw `Hemplate::render` only renders the template:
   it is **not** the normal Hemx page path. `PageResponse::fingerprint` then stamps
   the page root with the matching `data-hemx-build` and sets the response header.
+- The page composes its presentational child with
+  **`{+ CounterValue::new(self.count) +}`**. The child implements `Hemplate`, so
+  this writes its markup directly into the parent's buffer; ordinary text values
+  passed through `{+ ... +}` are escaped. The outer `heml::page::render` also
+  lowers the child's `count` resource. There is no intermediate `heml::render`
+  call inside the template and no raw `{+= ... =+}` wrapper. Raw interpolation
+  is for already-produced, explicitly trusted HTML and rejects Hemplate values.
+  `heml` names a generated Rust module, not another template operator.
 - The template's script field is the typed `hemx_axum::RuntimeScript`, not an
   unchecked URL. The Router serves the actual bundled runtime at
   `runtime_js_route_path()` using `get(|| async { hemx_axum::runtime_js() })`;
@@ -46,7 +55,7 @@ cargo test -p hemx-counter-example -j4
   form decoder validates the amount **before mutation**. An Axum body limit
   caps submissions at 1 KiB.
 - The handler changes the process-local count and returns
-  `heml::page::count.text(..)`. The runtime asks for `application/hemx`; that
+  `heml::counter_value::count.text(..)`. The runtime asks for `application/hemx`; that
   representation receives the effect. An ordinary form receives a 303 redirect
   after the same handler runs. Enhancement failures are reported in the root's
   accessible error outlet and are **never automatically replayed as POSTs**.
@@ -54,8 +63,9 @@ cargo test -p hemx-counter-example -j4
   require reloading. This small example does not add custom error pages.
 
 [`tests/router.rs`](tests/router.rs) drives the actual Router: it reads generated
-hidden fields from the rendered document, fetches the runtime through its script
-URL, checks the decoded effect against the rendered resource, exercises both
+hidden fields from the rendered document, verifies that the nested child is real
+markup with its own lowered resource, fetches the runtime through its script
+URL, checks the decoded effect against that same child resource, exercises both
 response representations, and proves rejected submissions leave state unchanged.
 These are server integration tests, not a browser automation suite.
 

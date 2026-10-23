@@ -95,6 +95,13 @@ async fn page_has_lowered_resources_native_fields_and_the_real_runtime() {
     assert_eq!(attr(&document, "form", "method"), "post");
     assert_eq!(attr(&document, "input[name=amount]", "value"), "1");
     assert_eq!(count(&document), "0");
+    // The derived child renders as markup through {+ ... +}; the outer
+    // generated renderer lowers the child's resource with its own identity.
+    assert_eq!(
+        document.select(&Selector::parse("output").unwrap()).count(),
+        1
+    );
+    assert_eq!(attr(&document, "output", "aria-live"), "polite");
     for authoring in ["[data-hemx-slot]", "[data-hemx-handle]", "[data-hemx-form]"] {
         assert_eq!(
             document

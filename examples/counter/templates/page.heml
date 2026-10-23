@@ -9,7 +9,7 @@
   <body>
     <main data-hemx-root>
       <h1>Hemx counter</h1>
-      <p>Count: <output data-hemx-slot="count" aria-live="polite">{+ self.count +}</output></p>
+      {+ CounterValue::new(self.count) +}
       <form action="/increment" method="post" data-hemx-form="increment_form" data-hemx-handle="increment" data-hemx-policy="queue">
         <label for="amount">Amount to add (0–255)</label>
         <input id="amount" name="amount" type="number" min="0" max="255" value="1" required>

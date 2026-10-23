@@ -52,7 +52,7 @@ batches before emitting bytes. Earlier wire ABIs are rejected, not translated.
 ## Run a complete example
 
 
-The [Axum + Hemplate counter](examples/counter/README.md) has one template,
+The [Axum + Hemplate counter](examples/counter/README.md) has a page with a nested component,
 generated typed form/resource/handle APIs, the actual browser runtime, and one
 mutation path for enhanced effects and native form redirects:
 
@@ -71,8 +71,16 @@ module), then `hemx_axum::PageResponse::full(..).fingerprint(heml::BUILD_FINGERP
 Generated rendering lowers the complete resource/handle table and adds native
 form hidden fields; the Axum response stamps the root build marker. Raw
 `Hemplate::render` alone does not lower those authoring names and is not the
-normal Hemx rendering path. The example also shows the async Axum wrapper for
-`runtime_js()` and typed `RuntimeScript` template interpolation.
+normal Hemx rendering path. Inside the template, compose children with
+`{+ Child::new(...) +}`: Hemplate renders a component directly into the parent's
+buffer, while ordinary text values are escaped. The outer generated renderer
+lowers the complete nested resource table; do not wrap each child in
+`{+= heml::render(&child) =+}`. Raw `{+= ... =+}` is for already-produced,
+explicitly trusted HTML, not component composition. `heml` is the generated Rust
+module, not another template operator.
+
+The example also shows the async Axum wrapper for `runtime_js()` and typed
+`RuntimeScript` template interpolation.
 
 ## Migrating from 0.4 to 0.5
 
