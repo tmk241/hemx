@@ -5,7 +5,8 @@ use axum::{
 };
 use futures_util::{stream, StreamExt};
 use hemx_axum::{
-    encode_sse_batch, sse, sse_event, EffectResponse, HEMX_CONTENT_TYPE, HEMX_FINGERPRINT_HEADER,
+    encode_sse_batch, sse, sse_event, sse_until_done, EffectResponse, HEMX_CONTENT_TYPE,
+    HEMX_FINGERPRINT_HEADER,
 };
 use hemx_core::{
     BuildFingerprint, Effect, EffectBatch, IntoEffect, ResourceId, ResourceKind, ResourceRef,
@@ -118,4 +119,32 @@ async fn sse_body_preserves_upstream_error_instead_of_emitting_error_event() {
     }
     assert_eq!(cause.to_string(), "upstream failed");
     assert!(cause.downcast_ref::<std::io::Error>().is_some());
+}
+
+#[tokio::test]
+async fn finished_stream_ends_with_an_end_event_but_a_failed_one_does_not() {
+    let response =
+        sse_until_done(stream::iter([Ok::<_, Infallible>(empty_batch())])).into_response();
+    let body = response.into_body().into_data_stream();
+    let frames: Vec<_> = body.map(|frame| frame.unwrap()).collect().await;
+    assert_eq!(
+        frames
+            .iter()
+            .map(|frame| frame.as_ref())
+            .collect::<Vec<_>>(),
+        [
+            &b"event: hemx\ndata: SEVNWAMAAAALAAAAAAAAAAAAAAA\n\n"[..],
+            &b"event: hemx-end\ndata: done\n\n"[..],
+        ]
+    );
+
+    let failing = sse_until_done(stream::iter([
+        Ok(empty_batch()),
+        Err(std::io::Error::other("shutting down")),
+    ]))
+    .into_response();
+    let mut body = failing.into_body().into_data_stream();
+    assert!(body.next().await.unwrap().is_ok());
+    assert!(body.next().await.unwrap().is_err());
+    assert!(body.next().await.is_none(), "no end event after a failure");
 }

@@ -1232,6 +1232,9 @@
     source.addEventListener("hemx", (event) => { if (current()) applySseMessage(root, event); });
     source.addEventListener("message", (event) => { if (current()) applySseMessage(root, event); });
     source.addEventListener("error", () => { if (current()) emit(root, "hemx:sse-error", "SSE connection failed"); });
+    // A finished stream says so; keep the closed source so the same URL is not
+    // reopened. A different data-hemx-sse URL starts a new stream.
+    source.addEventListener("hemx-end", () => { if (current()) source.close(); });
     sseSources.set(root, source);
   }
 

@@ -2,20 +2,23 @@
 
 Browser runtime assets embedded by Hemx integrations.
 
-## Native forms (Hemx 0.6.0)
+## Native forms (Hemx 0.6.1)
 
-Eligible forms are enhanced only at a cancelable, same-origin native navigation.
-The runtime requires `NavigateEvent.sourceElement` and `NavigateEvent.formData`;
-it does not require `precommitHandler`. Unsupported methods, encodings, targets,
-origins, or missing capabilities leave the native form submission alone.
+The browser validates a submission and runs every `submit` listener first. Hemx
+decides last: if no listener canceled the event, it takes the submission over by
+canceling that submit event and sending it itself. It never starts, cancels or
+intercepts a navigation, so automation such as Playwright sees an ordinary
+submit and is never left waiting for a navigation. Unsupported methods,
+encodings, targets, or origins leave the native form submission alone.
 
-Native constraint validation and all synchronous `submit` listeners run first.
-Use `event.preventDefault()` in a submit listener to veto the action. Once Hemx
-has canceled the navigation and admitted the action, a later `navigate` listener
-cannot retract that admission.
+Use `event.preventDefault()` in a submit listener to veto the action. A listener
+that only stops propagation keeps the native submission. Register vetoes before
+the submission starts: a listener added to `window` while the submit event
+dispatches runs after Hemx has taken the submission over.
 
-Hemx reuses the browser's successful controls, submitter overrides, image
-coordinates, and `formdata` additions; it does not serialize the form again.
+Hemx serializes the submission exactly once with `new FormData(form,
+submitter)`: successful controls, submitter overrides, image coordinates, and
+`formdata` additions are included, and `formdata` fires once.
 GET enhancement performs page navigation and updates URL/history after applying
 the response. Ordinary POST effects do not rewrite URL/history unless an effect
 explicitly requests navigation.
@@ -151,6 +154,46 @@ in order (every 100 ms while the document is hidden). Every intermediate effect
 is applied: final HTML alone cannot describe changes to unsent values or nested
 resources. A failed batch does not swallow the next received batch.
 
+A stream for work that finishes, such as one job's progress, ends with a
+`hemx-end` event (`hemx_axum::sse_until_done` sends it). The runtime then
+closes the `EventSource` instead of letting it reconnect, and does not reopen
+the same URL; setting `data-hemx-sse` to another URL starts a new stream.
+Removing the attribute or the root also closes the stream.
+
+## Islands and application events (Hemx 0.6.1)
+
+`data-hemx-island="NAME"` marks a leaf that browser code owns, such as a WebGL
+canvas. A morph keeps the island with the same name in the same root and never
+touches its attributes or children. It removes an island the new HTML no longer
+contains, and a full navigation replaces it. There is no after-morph hook: the
+server tells an island what changed with an application event.
+
+```rust,ignore
+const VIEWPORT: hemx::EventName = hemx::EventName::new("app:viewport");
+VIEWPORT.emit(serde_json::to_string(&viewport)?)
+```
+
+The runtime dispatches a bubbling `CustomEvent` with that name on the root that
+applies the batch, in batch order. Its `detail` is a `Uint8Array` holding the
+payload bytes exactly as sent; `emit` sends the string's UTF-8. Decode strictly
+and validate before touching the island:
+
+```ts
+root.addEventListener("app:viewport", (event) => {
+  const bytes = (event as CustomEvent<Uint8Array>).detail;
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  const viewport = parseViewport(JSON.parse(text)); // reject unknown shapes
+  const canvas = root.querySelector('[data-hemx-island="viewport"]');
+  if (canvas) render(canvas, viewport);
+});
+```
+
+Listen on the root, not on elements a morph may replace, and look the island up
+again for each event. Give payloads a revision and drop asynchronous work (asset
+loads) that finishes for an older one. Release GPU resources and listeners when
+the island leaves the document; a `MutationObserver` on the root that checks
+`island.isConnected` notices both removal and navigation.
+
 ## Rows
 
 A `Rows` declaration names a collection's complete key order and supplies new
@@ -197,18 +240,14 @@ The native browser suite passes in current Firefox, Chromium and WebKit
 (Playwright's build of the Safari 27.2 engine). Enhancement is decided by
 feature, not by browser name:
 
-- **Form enhancement** needs the Navigation API with
-  `NavigateEvent.sourceElement` and `formData`: Chromium, Firefox, and Safari
-  from 26.2. Without it every form submits natively, which is the baseline,
-  not an error.
+- **Form enhancement** needs `new FormData(form, submitter)`: Chromium 112,
+  Firefox 111, Safari 16.4 and later. Without it every form submits natively,
+  which is the baseline, not an error. The Navigation API is not used for forms.
 - **Request deadlines** work the same everywhere. WebKit rejects any aborted
   `fetch` with a plain `AbortError`; Hemx reads its own abort reason, so an
   expired deadline is still reported (and resent once with a ledger).
 - **Row movement** uses `moveBefore` where it exists. Safari does not have it
   yet; see "Rows" for what is reinserted and what is refused there.
-- Chromium also exposes `formData` for GET submissions and fires `formdata`
-  twice per navigation. Hemx takes the method from the form and never
-  serializes a form itself, so both are handled.
 
 The suite tests the WebKit engine on Linux, not Safari on macOS or iOS.
 

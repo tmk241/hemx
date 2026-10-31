@@ -190,6 +190,19 @@ async function observeStreamCases({ observe, root, waitFor, pause }) {
     return { text: status.textContent, callbacks, diagnostics: w.observed.diagnostics };
   });
 
+  // A finished stream ends with hemx-end: the runtime closes its EventSource
+  // and does not reopen the same URL. Without that, the closed
+  // connection would leave the source reconnecting (readyState 0).
+  await observe("streams-sse-finished", root('<p id="status" data-hemx-resource="1">before</p>').replace("<main ", '<main id="owner" data-hemx-sse="/streams/finished" '), async (w, d) => {
+    await waitFor(() => d.querySelector("#status").textContent === "finished", "finished batch");
+    const [entry] = w.streamProbe.entries;
+    await waitFor(() => entry.instance.readyState === 2, "source closed after the end event");
+    await mutate(w, d, () => d.querySelector("#owner").setAttribute("data-hemx-sse", "/streams/finished"));
+    await pause(100);
+    const opens = await (await nativeFetch("/streams/finished/opens")).json();
+    return { entries: w.streamProbe.entries.length, closes: entry.closes, readyState: entry.instance.readyState, opens, diagnostics: w.streamProbe.diagnostics };
+  }, "0", (w, d) => track(w, d, "sse"));
+
   // A replacement then a morph, applied in order, end in the new element.
   await observe("streams-sse-patch-fold", root('<div data-hemx-resource="1">x</div>').replace("<main ", '<main data-hemx-sse="/streams/patch-fold" '), async (w, d) => {
     await waitFor(() => d.querySelector("[data-hemx-resource]")?.textContent === "done", "final patch");

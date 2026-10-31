@@ -45,6 +45,9 @@ pub const HEMX_BUILD_FIELD: &str = "__b";
 pub struct AllowSameSite;
 pub const HEMX_RUNTIME_CONTENT_TYPE: &str = "application/javascript; charset=utf-8";
 pub const HEMX_SSE_EVENT: &str = "hemx";
+/// SSE event name that tells the runtime a finished stream is over: it closes
+/// its `EventSource` instead of reconnecting. Sent by [`sse_until_done`].
+pub const HEMX_SSE_END_EVENT: &str = "hemx-end";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RuntimeJs;
@@ -1361,6 +1364,42 @@ where
         Ok(Event::default().event(HEMX_SSE_EVENT).data(data))
     }))
     .keep_alive(KeepAlive::default())
+}
+
+/// Stream batches for work that finishes, such as one job's progress.
+///
+/// Like [`sse`], but the end of `batches` means the work is done: a final
+/// [`HEMX_SSE_END_EVENT`] tells the browser to close its `EventSource`, so it
+/// does not reconnect to a stream that has nothing more to say. End with an
+/// error instead (for example at shutdown) and no end event is sent; the
+/// browser reconnects as usual.
+pub fn sse_until_done<S, B, E>(
+    batches: S,
+) -> Sse<impl Stream<Item = Result<Event, axum::BoxError>> + Send>
+where
+    S: Stream<Item = Result<B, E>> + Send + 'static,
+    B: Borrow<EffectBatch> + Send + 'static,
+    E: Into<axum::BoxError>,
+{
+    let frames = Folding::new(batches).map(|frame| {
+        let data = encode_sse_batch(frame?.borrow())?;
+        Ok(Event::default().event(HEMX_SSE_EVENT).data(data))
+    });
+    let end = futures_util::stream::once(async {
+        // An event with empty data is never dispatched by EventSource.
+        Ok(Event::default().event(HEMX_SSE_END_EVENT).data("done"))
+    });
+    // A failed stream stops at its error; only a clean end reaches `end`.
+    let until_error = frames.chain(end).scan(false, |failed, item| {
+        let next = if *failed {
+            None
+        } else {
+            *failed = item.is_err();
+            Some(item)
+        };
+        std::future::ready(next)
+    });
+    Sse::new(until_error).keep_alive(KeepAlive::default())
 }
 
 /// A batch as received, or the fold of a run of them together with the run's

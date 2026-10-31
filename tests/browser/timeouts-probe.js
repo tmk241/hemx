@@ -56,12 +56,9 @@ async function observeTimeouts({ observe, waitFor, pause }) {
         await started(w, id);
         const form = d.querySelector("#form");
         form.setAttribute("data-hemx-timeout", "300ms");
-        // A listener registered after the runtime observes actual admission.
-        const admitted = new Promise(resolve => w.navigation.addEventListener("navigate", event => {
-          if (event.defaultPrevented) resolve();
-        }, { once: true }));
+        // The submit event is taken over while the click dispatches, so the
+        // submission and its policy are admitted when click() returns.
         d.querySelector("#trigger").click();
-        await admitted;
         // Queued requests retain the captured policy, just like submitted data.
         form.setAttribute("data-hemx-timeout", "invalid-after-admission");
       }

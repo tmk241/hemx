@@ -1,6 +1,7 @@
 //! Bounded application-owned native stream endpoints, not a production adapter.
 use std::collections::BTreeMap;
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,6 +36,7 @@ struct Case {
 pub struct Streams {
     cases: Arc<Mutex<BTreeMap<String, Case>>>,
     stop: watch::Sender<bool>,
+    finished_opens: Arc<AtomicUsize>,
 }
 
 impl Streams {
@@ -42,6 +44,7 @@ impl Streams {
         Self {
             cases: Arc::default(),
             stop: watch::channel(false).0,
+            finished_opens: Arc::default(),
         }
     }
 
@@ -51,6 +54,8 @@ impl Streams {
             .route("/streams/burst", get(burst))
             .route("/streams/delta-burst", get(delta_burst))
             .route("/streams/patch-fold", get(patch_fold))
+            .route("/streams/finished", get(finished))
+            .route("/streams/finished/opens", get(finished_opens))
             .route("/streams/{id}/state", get(state))
             .route("/streams/{id}/push/{kind}", post(push))
             .with_state(self.clone())
@@ -285,6 +290,17 @@ async fn patch_fold() -> impl IntoResponse {
         Ok::<_, Infallible>(hemx_axum::sse_event(batch).expect("canonical SSE event"))
     });
     Sse::new(stream::iter(events).chain(stream::pending()))
+}
+
+/// One batch, then the end of the work: `sse_until_done` tells the browser to
+/// close its EventSource instead of reconnecting.
+async fn finished(State(streams): State<Streams>) -> impl IntoResponse {
+    streams.finished_opens.fetch_add(1, Ordering::SeqCst);
+    hemx_axum::sse_until_done(stream::iter([Ok::<_, Infallible>(batch("finished", 0))]))
+}
+
+async fn finished_opens(State(streams): State<Streams>) -> Json<usize> {
+    Json(streams.finished_opens.load(Ordering::SeqCst))
 }
 
 async fn delta_burst() -> impl IntoResponse {

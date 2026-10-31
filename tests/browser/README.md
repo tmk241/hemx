@@ -18,10 +18,9 @@ example headless:
 `chromium --headless=new --user-data-dir="$(mktemp -d)" URL`.
 Without native `moveBefore` (Safari today) the positive movement case checks
 the refusal path instead, so run a browser that has it to cover both.
-Browsers differ in how often they fire `formdata` for one navigation
-(Chromium also builds `NavigateEvent.formData`, even for GET), so the cases
-assert what Hemx sends and that it never serializes a form itself, not the
-event count. Once the browser requests its cases, the suite has a separate
+Hemx takes a submission over at its submit event and serializes it exactly
+once, so the form cases assert one `formdata` event per serialization and that
+no navigation starts. Once the browser requests its cases, the suite has a separate
 60-second execution deadline; startup does not consume that budget. The page
 shows the current case and completed count. The fixture changes DOM and history
 state and creates synthetic files; it needs no account, external service, or real user data. Use a browser

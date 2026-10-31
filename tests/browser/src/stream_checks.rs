@@ -82,6 +82,17 @@ pub fn assert_stream_report(report: &Value, checked: &mut BTreeSet<String>, orig
     if deltas.is_err() {
         failures.push("streams-sse-delta-burst".to_owned());
     }
+    let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let observed = case(report, checked, "streams-sse-finished");
+        assert_eq!(observed["readyState"], 2, "the end event closes the source");
+        assert_eq!(observed["closes"], 1);
+        assert_eq!(observed["entries"], 1, "the same URL is not reopened");
+        assert_eq!(observed["opens"], 1, "the server sees one connection");
+        assert_eq!(observed["diagnostics"], json!([]));
+    }));
+    if finished.is_err() {
+        failures.push("streams-sse-finished".to_owned());
+    }
     let patches = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let observed = case(report, checked, "streams-sse-patch-fold");
         assert_eq!(

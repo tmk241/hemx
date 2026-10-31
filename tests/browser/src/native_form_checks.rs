@@ -5,7 +5,12 @@ use serde_json::{json, Value};
 use crate::checks::case;
 
 pub fn assert_native_forms(report: &Value, checked: &mut BTreeSet<String>) {
-    for mode in ["no-runtime", "missing-navigation", "enhanced"] {
+    for mode in [
+        "no-runtime",
+        "stopped-propagation",
+        "window-stopped",
+        "enhanced",
+    ] {
         let scenarios: &[(&str, bool, bool)] = if mode == "enhanced" {
             &[
                 ("post", true, false),
@@ -44,8 +49,8 @@ pub fn assert_native_forms(report: &Value, checked: &mut BTreeSet<String>) {
             assert_eq!(server["native"], u32::from(!enhanced), "{name}");
             assert_eq!(server["method"], method.to_uppercase(), "{name}");
             assert_eq!(observed["runtimeLoaded"], mode != "no-runtime", "{name}");
-            if mode == "missing-navigation" {
-                assert_eq!(observed["navigationAvailable"], false, "{name}");
+            if mode == "stopped-propagation" || mode == "window-stopped" {
+                assert_eq!(observed["stopped"], true, "{name}");
             }
             let message = if !valid {
                 "Value is required"

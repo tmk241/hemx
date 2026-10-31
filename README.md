@@ -156,6 +156,12 @@ submissions from one route; `runtime_route()` serves the runtime;
 resend safe, and the browser reports `HEMX_SUBMISSION_PENDING` for a resend
 that finds its first request still running.
 
+New in 0.6.1 (`hemx-js`, `hemx-axum`): forms are taken over at their submit
+event instead of by canceling a navigation, so Playwright and other automation
+no longer wait for a navigation that never finishes, and enhancement no longer
+needs the Navigation API. `hemx_axum::sse_until_done` ends a stream for
+finished work without the browser reconnecting.
+
 ## Migrating from 0.4 to 0.5
 
 Rust 1.91 or newer is required. Use Hemplate 0.4 with hemplate-runtime 0.3;

@@ -5,37 +5,49 @@ use serde_json::{json, Value};
 use crate::checks::case;
 
 pub fn assert_admission(report: &Value, checked: &mut BTreeSet<String>) {
+    let nested = case(report, checked, "form-admission-nested");
+    assert_eq!(
+        nested["urls"],
+        json!(["/nested-a", "/nested-b"]),
+        "a submission started inside another's submit listener keeps both enhanced"
+    );
+    assert_eq!(nested["url"], nested["before"]);
     for name in [
-        "late-navigate-veto",
+        "navigate-listener",
         "manual-data",
         "manual-data-canceled",
         "multipart",
         "image-get",
-        "no-precommit",
+        "no-navigation-api",
+        "base-target",
     ] {
         let observed = case(report, checked, &format!("form-admission-{name}"));
         let canceled = name == "manual-data-canceled";
+        // Native submissions Hemx leaves alone: no request, no serialization by Hemx.
+        let native = name == "base-target";
         let requests = observed["requests"].as_array().unwrap();
-        assert_eq!(requests.len(), usize::from(!canceled), "{name}");
+        assert_eq!(requests.len(), usize::from(!canceled && !native), "{name}");
         assert_eq!(observed["diagnostics"], json!([]), "{name}");
-        // Hemx copies the entries the browser serialized for the navigation and
-        // never serializes the form again; only the app's own `new FormData`
-        // in "manual-data" counts. Browsers may fire `formdata` more than once
-        // for one navigation (Chromium also builds `NavigateEvent.formData`),
-        // so the event count is only a lower bound.
+        // Hemx takes a submission over by serializing it exactly once itself;
+        // the browser never serializes it, so `formdata` fires once per
+        // serialization. Only the app's own `new FormData` in "manual-data"
+        // adds one; a vetoed submission is serialized by nobody.
         let app_serializations = usize::from(name.starts_with("manual-data"));
-        assert_eq!(observed["serialized"], app_serializations, "{name}");
-        let native = usize::from(!canceled);
+        let taken = usize::from(!canceled && !native);
+        // The browser serializes a native submission itself.
+        assert_eq!(observed["serialized"], app_serializations + taken, "{name}");
+        let data_events = observed["dataEvents"].as_u64().unwrap() as usize;
         assert!(
-            observed["dataEvents"].as_u64().unwrap() >= (app_serializations + native) as u64,
+            native || data_events == app_serializations + taken,
             "{name}"
         );
-        assert_eq!(
-            observed["vetoes"],
-            usize::from(name == "late-navigate-veto" || canceled)
-        );
-        if name == "no-precommit" {
-            assert_eq!(observed["precommit"], "undefined");
+
+        // No document navigation starts, so navigate listeners never see the
+        // submission itself.
+        assert_eq!(observed["navigations"], 0, "{name}");
+        assert_eq!(observed["vetoes"], usize::from(canceled), "{name}");
+        if name == "no-navigation-api" {
+            assert_eq!(observed["navigationApi"], "undefined");
         }
         if name != "image-get" {
             assert_eq!(observed["url"], observed["before"]["url"], "{name}");
@@ -45,7 +57,7 @@ pub fn assert_admission(report: &Value, checked: &mut BTreeSet<String>) {
                 "history state: {name}"
             );
         }
-        if canceled {
+        if canceled || native {
             continue;
         }
         let request = &requests[0];

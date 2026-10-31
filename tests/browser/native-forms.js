@@ -34,7 +34,7 @@ async function observeNativeForms({observe, fixture, root, cases, waitFor, pause
       </form>${cases.textInitial}</main>`;
   }
 
-  for (const mode of ["no-runtime", "missing-navigation", "enhanced"]) {
+  for (const mode of ["no-runtime", "stopped-propagation", "window-stopped", "enhanced"]) {
     const scenarios = mode === "enhanced"
       ? [["post", true, false], ["post", false, false], ["post", true, true]]
       : [["get", true, false], ["get", false, false], ["post", true, false],
@@ -47,7 +47,11 @@ async function observeNativeForms({observe, fixture, root, cases, waitFor, pause
         const before = w.location.href;
         const oldHistory = w.history.length;
         const runtimeLoaded = !!w.hemx;
-        const navigationAvailable = !!w.navigation;
+        // A submit listener that stops propagation keeps the native submission.
+        // Also on the window itself, where Hemx listens after it.
+        const stopped = mode === "stopped-propagation" || mode === "window-stopped";
+        if (mode === "stopped-propagation") d.querySelector("form").addEventListener("submit", (event) => event.stopPropagation());
+        if (mode === "window-stopped") w.addEventListener("submit", (event) => event.stopPropagation());
         d.querySelector("button").click();
         if (enhanced) {
           await waitFor(() => d.querySelector("#nested")?.textContent === (valid ? "Saved" : "Value is required"), "real enhanced form result");
@@ -61,7 +65,7 @@ async function observeNativeForms({observe, fixture, root, cases, waitFor, pause
         const invalid = current.querySelector('[name="value"]');
         const description = invalid?.getAttribute("aria-describedby");
         return {
-          server: await state(id), runtimeLoaded, navigationAvailable,
+          server: await state(id), runtimeLoaded, stopped,
           navigated: current !== d, before, location: w.location.href,
           historyDelta: w.history.length - oldHistory,
           contentType: current.contentType,
@@ -73,9 +77,6 @@ async function observeNativeForms({observe, fixture, root, cases, waitFor, pause
       }, fingerprint, (w) => {
         if (typeof w.nativeFetch !== "function") throw new Error("probe must retain nativeFetch before installing its stub");
         w.fetch = w.nativeFetch;
-        if (mode === "missing-navigation") {
-          Object.defineProperty(w, "navigation", {value: undefined, configurable: true});
-        }
       }, {runtime: mode !== "no-runtime"});
     }
   }

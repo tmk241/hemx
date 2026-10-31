@@ -1,8 +1,8 @@
 // Native submission owns validation, successful controls and submit cancellation.
-// This adapter only admits an already constructed, owned navigation as an action.
+// Hemx decides after every other submit listener has run and then takes the
+// submission over by canceling that submit event. It never starts, cancels or
+// intercepts a navigation, so browsers and automation see an ordinary submit.
 function createForms(dom, ownerOf, accepts, admit) {
-  const submitted = new WeakMap();
-  const prepared = new WeakMap();
   const nativeForm = (form, name) =>
     Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, name).get.call(form);
   const isSubmitter = (node) =>
@@ -13,98 +13,73 @@ function createForms(dom, ownerOf, accepts, admit) {
     if (!form) return { action: location.href, method: "POST", enctype: "application/x-www-form-urlencoded", target: "" };
     const value = (name, property) => isSubmitter(source) && dom.has(source, `form${name}`)
       ? source[property] : nativeForm(form, name);
+    // Without an own target the document's first <base target> applies.
+    const base = document.querySelector("base[target]");
     return {
       action: value("action", "formAction"),
       method: value("method", "formMethod").toUpperCase(),
       enctype: value("enctype", "formEnctype"),
-      target: value("target", "formTarget"),
+      target: value("target", "formTarget") || (base ? base.getAttribute("target") : ""),
     };
   }
 
-  function clear(form) {
-    const record = prepared.get(form);
-    if (!record) return;
-    record.observer.disconnect();
-    clearTimeout(record.expiry);
-    prepared.delete(form);
+  // `new FormData(form, submitter)` is the one serialization of a taken-over
+  // submission; without submitter support it would drop the clicked button.
+  function serializesSubmitter() {
+    const form = document.createElement("form");
+    const button = document.createElement("button");
+    button.name = "hemx";
+    button.value = "submitter";
+    form.append(button);
+    try {
+      return new FormData(form, button).get("hemx") === "submitter";
+    } catch (_) {
+      return false;
+    }
   }
 
   function bind() {
-    // Test the actual API surface used, not an unrelated precommit capability.
-    if (!window.navigation || typeof NavigateEvent === "undefined" ||
-        !("sourceElement" in NavigateEvent.prototype) || !("formData" in NavigateEvent.prototype)) return;
+    if (!serializesSubmitter()) return;
 
     dom.on(document, "submit", (event) => {
       const form = event.target;
       if (!(form instanceof HTMLFormElement) || !event.isTrusted) return;
-      clear(form);
-      submitted.delete(form);
       const owner = ownerOf(form);
       if (!owner) return;
-      submitted.set(form, { event, source: event.submitter || form, owner });
+      // A window listener added while the event is still capturing runs after
+      // every listener already on its path. (A listener that a submit handler
+      // adds to the window during this dispatch runs after it.) Each submission
+      // owns its listener: a nested submit (requestSubmit inside a submit
+      // listener) reaches this one first but leaves it in place, because the
+      // outer event is still dispatching. One left behind by stopped
+      // propagation removes itself when a later submit finds its event done.
+      const last = (current) => {
+        if (current !== event && event.eventPhase !== Event.NONE) return;
+        window.removeEventListener("submit", last);
+        if (current === event) take(event, form, owner);
+      };
+      window.addEventListener("submit", last);
     }, true);
+  }
 
-    dom.on(document, "formdata", (event) => {
-      const form = event.target;
-      const pending = submitted.get(form);
-      // FormData hooks can run during dispatch. Keep the submit record until
-      // navigation; only that native boundary establishes final cancellation.
-      if (!pending || pending.event.defaultPrevented || ownerOf(form) !== pending.owner) return;
-      clear(form);
-      const source = pending.source;
-      if (source !== form && source.form !== form) return;
-      if (!accepts(form, source)) return;
-      const options = submission(form, source);
-      if (!['GET', 'POST'].includes(options.method) ||
-          (options.target && options.target !== '_self') ||
-          !['application/x-www-form-urlencoded', 'multipart/form-data'].includes(options.enctype)) return;
-      const action = new URL(options.action, location.href);
-      if (action.origin !== location.origin || !['http:', 'https:'].includes(action.protocol)) return;
-
-      // Navigation may be queued. If its routing/dispatch metadata changes in
-      // between, leave the exact native submission alone instead of guessing.
-      const record = { source, owner: pending.owner, options, changed: false };
-      record.observer = new MutationObserver(() => { record.changed = true; });
-      record.observer.observe(form, { attributes: true });
-      if (source !== form) record.observer.observe(source, { attributes: true });
-      // A disconnected form or canceled planned navigation may never navigate.
-      // Bound this transient observation; it is not an application-state store.
-      record.expiry = setTimeout(() => { clear(form); submitted.delete(form); }, 10000);
-      prepared.set(form, record);
-    }, true);
-
-    dom.on(window.navigation, "navigate", (event) => {
-      const source = event.sourceElement;
-      const form = source instanceof HTMLFormElement ? source : isSubmitter(source) ? source.form : null;
-      if (!form) return;
-      const pending = submitted.get(form);
-      submitted.delete(form);
-      const record = prepared.get(form);
-      if (!record) return;
-      const changed = record.changed || record.observer.takeRecords().length !== 0;
-      clear(form);
-      if (!pending || pending.event.defaultPrevented || changed || event.defaultPrevented || !event.cancelable || !event.canIntercept ||
-          event.hashChange || event.downloadRequest !== null ||
-          !dom.isConnected(form) || ownerOf(form) !== record.owner ||
-          (record.source !== form && record.source.form !== form)) return;
-      const destination = new URL(event.destination.url);
-      const action = new URL(record.options.action, location.href);
-      if (destination.origin !== location.origin || destination.origin !== action.origin ||
-          destination.pathname !== action.pathname || destination.hash !== action.hash) return;
-      // The form's own method decides. Chromium also exposes `formData` for a
-      // GET submission, so its presence cannot tell the methods apart.
-      const method = record.options.method;
-      if (method === "POST" && (event.formData === null || destination.search !== action.search)) return;
-
-      // The browser has already serialized exactly once, including formdata
-      // hooks and image coordinates. Copy entries, never serialize the DOM again.
-      const data = new FormData();
-      const entries = method === "GET" ? destination.searchParams : event.formData;
-      for (const [name, value] of entries) data.append(name, value);
-      const capture = { form, data, submission: { ...record.options, action: destination.href } };
-      event.preventDefault();
-      admit(form, record.source, capture);
-    });
+  function take(event, form, owner) {
+    // A listener that canceled the event vetoes; one that stopped propagation
+    // (also on the window itself, before this listener) keeps it native.
+    if (event.defaultPrevented || event.cancelBubble || !dom.isConnected(form) || ownerOf(form) !== owner) return;
+    const source = event.submitter || form;
+    if (source !== form && source.form !== form) return;
+    if (!accepts(form, source)) return;
+    const options = submission(form, source);
+    if (!["GET", "POST"].includes(options.method) ||
+        (options.target && options.target !== "_self") ||
+        !["application/x-www-form-urlencoded", "multipart/form-data"].includes(options.enctype)) return;
+    const action = new URL(options.action, location.href);
+    if (action.origin !== location.origin || !["http:", "https:"].includes(action.protocol)) return;
+    // Serialize exactly once, including formdata hooks and image coordinates.
+    // If that throws, the native submission proceeds untouched.
+    const data = source === form ? new FormData(form) : new FormData(form, source);
+    event.preventDefault();
+    admit(form, source, { form, data, submission: { ...options, action: action.href } });
   }
 
   return { bind, submission, isSubmitter };

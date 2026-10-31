@@ -94,6 +94,22 @@ must fit the batch budget; for state that may not, return a `Visit` of the page.
 `Live::new` replays the last 1,024 batches; `Live::with_replay` sets another
 window.
 
+### Streams that finish
+
+`sse` streams are open-ended: when one ends, the browser's `EventSource`
+reconnects. For work that finishes, such as one job's progress, use
+`sse_until_done(batches)`: after the last batch it sends a `hemx-end` event and
+the runtime closes the connection for good. End the stream with an error instead
+(for example at shutdown) and no end event is sent, so the browser reconnects
+as usual.
+
+```rust,ignore
+async fn job_events(State(app): State<App>, Path(id): Path<JobId>) -> impl IntoResponse {
+    // Yields progress batches and ends when the job is done.
+    hemx_axum::sse_until_done(app.jobs.progress(id))
+}
+```
+
 ## Native forms first, optional enhancement
 
 Start with an ordinary form: a real application `action`, a `method`, named

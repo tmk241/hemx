@@ -315,9 +315,9 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "hemplate"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41eb918b6e6b283db968af3c382a6f49adbed43b5c76cff1323bcb72e7ae62f9"
+checksum = "aa717d837d3a3a557a38c43a186e50497920e6a679863608c56c8cd1c98f153b"
 dependencies = [
  "hemplate-derive",
  "hemplate-runtime",
@@ -336,9 +336,9 @@ dependencies = [
 
 [[package]]
 name = "hemplate-derive"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a62e5857051aaef3f5a3561f7de114e84a0c303455793ff8bc56a51514ad24b4"
+checksum = "bacca490222114abb028abeabceddf5cc148ef1baec3a9022052080c0344f3e7"
 dependencies = [
  "hemplate-core",
  "proc-macro2",
@@ -368,9 +368,9 @@ dependencies = [
 
 [[package]]
 name = "hemplate-runtime"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f2bfb3de53e4a14c81c61b8571940c4e8decf02f90a1382c3d96a6392d6b9dd"
+checksum = "ae516e8c7108b7664a0efe3b06cb9490855ae44587fa6379249d0cf1ff49027c"
 dependencies = [
  "thiserror",
 ]
@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "hemx-axum"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "axum",
  "futures-util",
@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "hemx-js"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "sha2",
 ]
