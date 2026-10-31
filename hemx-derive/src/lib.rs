@@ -203,7 +203,12 @@ fn surface_include() -> String {
     };
 
     if path.exists() {
-        format!(" include!({:?}); ", path.display().to_string())
+        // The generated file requires this marker, so its names can only be
+        // included into this module, never into the application's own scope.
+        format!(
+            " #[doc(hidden)] mod __hemx_surface {{ pub const INCLUDE_THROUGH_HEMX_SURFACE: () = (); }} include!({:?}); ",
+            path.display().to_string()
+        )
     } else {
         format!(
             " compile_error!({:?}); ",
@@ -371,7 +376,17 @@ fn form_contract_errors(
         })
         .collect::<Vec<_>>();
     let mut errors = Vec::new();
-    for field in expected {
+    // A model field must correspond to a control of this form in the template
+    // that declares it; a control rendered by a nested view does not count.
+    let template = form_template(syms_path, form_name).unwrap_or_else(|| "its template".into());
+    for (ident, _) in &actual {
+        if !expected.iter().any(|field| &field.ident == ident) {
+            errors.push(format!(
+                "hemx form `{form_name}` field `{ident}` has no form control in {template}; put a control named `{ident}` inside the <form data-hemx-form=\"{form_name}\"> element of that template, not in a nested view, or remove the field"
+            ));
+        }
+    }
+    for field in &expected {
         let Some((_, ty)) = actual.iter().find(|(ident, _)| ident == &field.ident) else {
             errors.push(format!(
                 "hemx form `{form_name}` is missing field `{}` for form control `{}`",
@@ -522,6 +537,22 @@ fn form_resource_id(path: &PathBuf, form_name: &str) -> Option<u32> {
             return None;
         }
         fields.next()?.parse().ok()
+    })
+}
+
+/// The template that declares a form, from its `template.heml::name` symbol.
+fn form_template(path: &PathBuf, form_name: &str) -> Option<String> {
+    let syms = std::fs::read_to_string(path).ok()?;
+    syms.lines().find_map(|line| {
+        let mut fields = line.split('\t');
+        if !matches!(fields.next(), Some("form")) {
+            return None;
+        }
+        let symbol = fields.next()?;
+        (fields.next()? == form_name).then(|| {
+            let template = symbol.rsplit_once("::").map_or(symbol, |(file, _)| file);
+            format!("`{template}`")
+        })
     })
 }
 

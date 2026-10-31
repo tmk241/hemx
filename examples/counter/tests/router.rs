@@ -113,6 +113,7 @@ async fn page_has_lowered_resources_native_fields_and_the_real_runtime() {
 
     let script = attr(&document, "script", "src");
     assert_eq!(script, hemx_axum::runtime_js_route_path());
+    // Served by the adapter's runtime route; the application wrote no handler.
     let response = app
         .oneshot(Request::get(script).body(Body::empty()).unwrap())
         .await
@@ -166,6 +167,58 @@ async fn enhanced_and_native_submissions_mutate_the_same_counter() {
     assert_eq!(native.status(), StatusCode::SEE_OTHER);
     assert_eq!(native.headers()[header::LOCATION], "/");
     assert_eq!(count(&page(&app).await), "5");
+
+    // The redirect is the action's declared location, never one the request names.
+    let mut elsewhere = submit(form_body(&document, "1"), false, "same-origin");
+    elsewhere.headers_mut().insert(
+        header::REFERER,
+        "https://elsewhere.example/phish".parse().unwrap(),
+    );
+    let native = app.clone().oneshot(elsewhere).await.unwrap();
+    assert_eq!(native.status(), StatusCode::SEE_OTHER);
+    assert_eq!(native.headers()[header::LOCATION], "/");
+    assert_eq!(count(&page(&app).await), "6");
+}
+
+#[tokio::test]
+async fn native_invalid_input_returns_the_page_with_the_rejected_value_and_problem() {
+    let app = app();
+    let document = page(&app).await;
+    let response = app
+        .clone()
+        .oneshot(submit(form_body(&document, "256"), false, "same-origin"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "text/html; charset=utf-8"
+    );
+    let feedback = Html::parse_document(&String::from_utf8(bytes(response).await).unwrap());
+    // The rejected value is kept, the field is marked and its problem associated.
+    assert_eq!(attr(&feedback, "input[name=amount]", "value"), "256");
+    assert_eq!(
+        attr(&feedback, "input[name=amount]", "aria-invalid"),
+        "true"
+    );
+    let problem = attr(&feedback, "input[name=amount]", "aria-describedby");
+    let text: String = feedback
+        .select(&Selector::parse(&format!("#{problem}")).unwrap())
+        .next()
+        .unwrap()
+        .text()
+        .collect();
+    assert!(
+        text.starts_with("Enter a whole number from 0 to 255"),
+        "{text}"
+    );
+    // It is a real page of this build: a retry submits the same generated fields.
+    assert_eq!(
+        attr(&feedback, "form input[name=__b]", "value"),
+        heml::BUILD_FINGERPRINT.0.to_string()
+    );
+    assert_eq!(count(&feedback), "0");
+    assert_eq!(count(&page(&app).await), "0");
 }
 
 #[tokio::test]
@@ -175,6 +228,12 @@ async fn invalid_stale_and_cross_site_forms_never_mutate_either_representation()
     let handle = attr(&document, "form input[name=__h]", "value");
     let stale = heml::BUILD_FINGERPRINT.0.wrapping_add(1);
     for enhanced in [true, false] {
+        // Enhanced requests get a plain rejection; native ones the feedback page.
+        let invalid = if enhanced {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::UNPROCESSABLE_ENTITY
+        };
         for (body, site, status) in [
             (
                 format!("__h={handle}&amount=1"),
@@ -196,21 +255,9 @@ async fn invalid_stale_and_cross_site_forms_never_mutate_either_representation()
                 "same-site",
                 StatusCode::FORBIDDEN,
             ),
-            (
-                form_body(&document, "256"),
-                "same-origin",
-                StatusCode::BAD_REQUEST,
-            ),
-            (
-                form_body(&document, "-1"),
-                "same-origin",
-                StatusCode::BAD_REQUEST,
-            ),
-            (
-                form_body(&document, "no"),
-                "same-origin",
-                StatusCode::BAD_REQUEST,
-            ),
+            (form_body(&document, "256"), "same-origin", invalid),
+            (form_body(&document, "-1"), "same-origin", invalid),
+            (form_body(&document, "no"), "same-origin", invalid),
             (
                 form_body(&document, &"1".repeat(1025)),
                 "same-origin",
@@ -236,4 +283,24 @@ async fn invalid_stale_and_cross_site_forms_never_mutate_either_representation()
             assert_eq!(count(&page(&app).await), "0");
         }
     }
+}
+
+#[tokio::test]
+async fn a_resent_enhanced_submission_adds_its_amount_once() {
+    let app = app();
+    let document = page(&app).await;
+    let resend = || {
+        let mut request = submit(form_body(&document, "4"), true, "same-origin");
+        request.headers_mut().insert(
+            hemx_axum::HEMX_TOKEN_HEADER,
+            "5f0c2a9e7b1d4c3a8e6f0b2d4a6c8e0f".parse().unwrap(),
+        );
+        request
+    };
+    let first = app.clone().oneshot(resend()).await.unwrap();
+    assert_eq!(first.headers()[hemx_axum::HEMX_LEDGER_HEADER], "1");
+    let first = bytes(first).await;
+    let again = bytes(app.clone().oneshot(resend()).await.unwrap()).await;
+    assert_eq!(again, first);
+    assert_eq!(count(&page(&app).await), "4");
 }

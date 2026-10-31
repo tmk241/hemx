@@ -247,6 +247,9 @@ impl TestProcess {
     }
 
     /// Return the bounded, currently captured standard output.
+    ///
+    /// A reader thread captures output concurrently, so a line printed just
+    /// before the process became ready may not be here yet; poll for it.
     pub fn stdout(&self) -> String {
         self.stdout
             .as_ref()

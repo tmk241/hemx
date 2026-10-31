@@ -10,9 +10,39 @@
     <main data-hemx-root>
       <h1>Hemx counter</h1>
       {+ CounterValue::new(self.count) +}
-      <form action="/increment" method="post" data-hemx-form="increment_form" data-hemx-handle="increment" data-hemx-policy="queue">
+      <form
+        action="/increment"
+        method="post"
+        data-hemx-form="increment_form"
+        data-hemx-handle="increment"
+        data-hemx-policy="queue"
+      >
         <label for="amount">Amount to add (0–255)</label>
-        <input id="amount" name="amount" type="number" min="0" max="255" value="1" required>
+        <template h-if="let Some(problem) = &self.problem">
+          <input
+            id="amount"
+            name="amount"
+            type="number"
+            min="0"
+            max="255"
+            +value="self.amount"
+            required
+            aria-invalid="true"
+            aria-describedby="amount-problem"
+          >
+          <p id="amount-problem">{+ problem +}</p>
+        </template>
+        <template h-else>
+          <input
+            id="amount"
+            name="amount"
+            type="number"
+            min="0"
+            max="255"
+            +value="self.amount"
+            required
+          >
+        </template>
         <button type="submit">Add</button>
       </form>
       <p data-hemx-error role="alert"></p>

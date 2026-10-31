@@ -14,7 +14,10 @@ browser widgets belong in explicit islands.
 
 ## Checks
 
-Add a focused regression test for changed behavior. Before finishing, run:
+Add a focused regression test for changed behavior. Templates must stay in the
+canonical layout (`hemplate-fmt --check templates`); the build enforces it.
+Browser behavior is checked by `cargo run -p hemx-browser-test` in current
+Firefox, Chromium and WebKit with fresh profiles. Before finishing, run:
 
 ```console
 cargo fmt --all -- --check

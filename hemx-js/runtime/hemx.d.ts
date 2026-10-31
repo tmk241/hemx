@@ -48,7 +48,9 @@ export type HemxErrorCode =
   | "HEMX_BATCH_FAILED"
   | "HEMX_ROWS_DRIFT"
   | "HEMX_UNSUPPORTED_ABI"
-  | "HEMX_RUNTIME_FAILED";
+  | "HEMX_RUNTIME_FAILED"
+  /** A resent submission whose first request the server still runs (HTTP 425). */
+  | "HEMX_SUBMISSION_PENDING";
 
 export interface HemxErrorDetail {
   code: HemxErrorCode;

@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
-hemplate = { version = "0.4.0", default-features = false, features = ["derive"] }
+hemplate = { version = "0.5.0", default-features = false, features = ["derive"] }
 hemx = { path = "../../hemx" }
 hemx-axum = { path = "../../hemx-axum" }
 hemx-js = { path = "../../hemx-js" }

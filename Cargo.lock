@@ -315,9 +315,9 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "hemplate"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "441e325001a59d2234942f37c2bcab32c637c5deb8b3d47f9298c5eedae1380c"
+checksum = "41eb918b6e6b283db968af3c382a6f49adbed43b5c76cff1323bcb72e7ae62f9"
 dependencies = [
  "hemplate-derive",
  "hemplate-runtime",
@@ -325,9 +325,9 @@ dependencies = [
 
 [[package]]
 name = "hemplate-core"
-version = "0.3.1"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c10aa757b26e307720966a36b0b83e5b038576445043945f3ec791678b05fa7b"
+checksum = "0e2baf7eb03e4e6b72a65d08184f8514e37547ee2c0669384cfa917ff260ad19"
 dependencies = [
  "hemplate-parser",
  "thiserror",
@@ -336,9 +336,9 @@ dependencies = [
 
 [[package]]
 name = "hemplate-derive"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ece62c6f3ec6131b0a2aedf09e253d99f1fb07b390a8e06eebca43eafdf9bf47"
+checksum = "a62e5857051aaef3f5a3561f7de114e84a0c303455793ff8bc56a51514ad24b4"
 dependencies = [
  "hemplate-core",
  "proc-macro2",
@@ -347,10 +347,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "hemplate-parser"
-version = "0.2.0"
+name = "hemplate-fmt"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27f4555faddf1eb83f9f2489dbbec4f051e47a7d0d056ba3948e275b03eb46d3"
+checksum = "c63e9f13604988b7dffdee48f1446bd0295dc44d613e58182b77a26b5f2ca0d4"
+dependencies = [
+ "hemplate-parser",
+ "tree-sitter",
+]
+
+[[package]]
+name = "hemplate-parser"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3971229dc9843babb637c3a08a61c83ae6f39a0282af093fa56f4915d39e0240"
 dependencies = [
  "tree-sitter",
  "tree-sitter-hemplate",
@@ -358,16 +368,16 @@ dependencies = [
 
 [[package]]
 name = "hemplate-runtime"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c83fd5aeb87b7ee7d98f65a396853408206e3e698c596770213b52f68b6a5cd1"
+checksum = "6f2bfb3de53e4a14c81c61b8571940c4e8decf02f90a1382c3d96a6392d6b9dd"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "hemx"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "hemplate",
  "hemx-core",
@@ -376,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "hemx-axum"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -406,9 +416,10 @@ dependencies = [
 
 [[package]]
 name = "hemx-build"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "hemplate-core",
+ "hemplate-fmt",
  "hemx-core",
  "quote",
  "syn 2.0.119",
@@ -416,8 +427,9 @@ dependencies = [
 
 [[package]]
 name = "hemx-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
+ "hemplate-runtime",
  "postcard",
  "serde",
 ]
@@ -438,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "hemx-derive"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -447,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "hemx-js"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "sha2",
 ]
@@ -463,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "hemx-test"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "axum",
  "hemx-axum",
@@ -1171,9 +1183,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-hemplate"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f8babe6a7149830dce12a2534b5ba72544a37e951cc6407551bd101bde2aa77"
+checksum = "c4f9d5b2622c0d26bf5b4fa76fc0606567ee514bf2fefd5efe12d6b734b468da"
 dependencies = [
  "cc",
  "tree-sitter-language",

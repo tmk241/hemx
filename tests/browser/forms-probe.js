@@ -7,8 +7,15 @@ async function observeFormAdmission({observe, root, waitFor, pause}) {
       const form = d.querySelector("form");
       const source = d.querySelector('button,input[type="image"]');
       const before = { url: w.location.href, history: w.history.length, state: JSON.stringify(w.history.state) };
-      let dataEvents = 0, vetoes = 0;
+      let dataEvents = 0, vetoes = 0, serialized = 0;
       form.addEventListener("formdata", event => { dataEvents++; event.formData.append("hook", "once"); });
+      // Count page-script serializations of the form (Hemx or the app); the
+      // browser's own entry-list construction is not a page-script call.
+      const NativeFormData = w.FormData;
+      w.FormData = new Proxy(NativeFormData, { construct(target, args) {
+        if (args[0]) serialized++;
+        return Reflect.construct(target, args);
+      } });
       if (name.startsWith("manual-data")) form.addEventListener("submit", () => { new w.FormData(form); });
       if (name === "manual-data-canceled") d.addEventListener("submit", event => { vetoes++; event.preventDefault(); });
       if (name === "late-navigate-veto") w.navigation.addEventListener("navigate", event => { vetoes++; event.preventDefault(); });
@@ -25,7 +32,8 @@ async function observeFormAdmission({observe, root, waitFor, pause}) {
         await waitFor(() => !form.hasAttribute("aria-busy"), `completed ${name}`);
         if (image) await waitFor(() => w.location.pathname === "/admission", "image GET history");
       }
-      return {dataEvents, vetoes, requests: w.observed.requests, before, url: w.location.href,
+      w.FormData = NativeFormData;
+      return {dataEvents, vetoes, serialized, requests: w.observed.requests, before, url: w.location.href,
         history: w.history.length, state: JSON.stringify(w.history.state), diagnostics: w.observed.diagnostics,
         precommit: typeof w.NavigationPrecommitController};
     }, "0", name === "no-precommit" ? w => {

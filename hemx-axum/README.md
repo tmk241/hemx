@@ -16,7 +16,6 @@ both upstream and encoding failures to `axum::BoxError` and fails the body
 stream. It does not invent an error-event protocol; applications decide how to
 recover from a failed connection. Already-sent events cannot be recalled.
 
-
 When a client reads slower than updates arrive, `sse(stream)` coalesces waiting
 batches using the core folding rules: batches with the same ABI and fingerprint
 and no side effects may share one frame, with **every operation preserved in
@@ -38,9 +37,8 @@ would exceed the batch budget.
 
 ## Including the runtime
 
-
-Serve the browser runtime with `runtime_js()` at `runtime_js_route_path()` and
-include it with the typed `RuntimeScript` value. Hemplate does not accept a plain
+Merge `hemx_axum::runtime_route()` into the Router to serve the browser runtime
+at `runtime_js_route_path()`, and include it with the typed `RuntimeScript` value. Hemplate does not accept a plain
 string in `<script src>` (even an `https:` URL there loads code), and
 `RuntimeScript` is a same-origin, content-addressed path that needs no unchecked
 constructor:
@@ -112,6 +110,28 @@ GET page; validation failure returns HTML (for example, HTTP 422), with
 `aria-invalid` fields and associated error messages. Never serve canonical effect
 bytes as the document for an ordinary browser submission.
 
+`hemx_axum::action(registry, Native::new(location, feedback))` is that route for
+generated forms. It runs the extraction guards and the registry's handler once,
+then answers the runtime's enhanced request with effects and a plain form with
+**303 See Other** to `location`, a fixed same-origin path (never one taken from
+the request, such as `Referer`). Invalid input renders `feedback(input, problem)`
+as an HTML page with status **422** and no mutation; render the same page with
+the submitted value, `aria-invalid` and an associated message. Applications do
+not inspect `Accept` themselves:
+
+```rust,ignore
+Router::new()
+    .route("/", get(index))
+    .route(
+        "/increment",
+        hemx_axum::action(
+            interactions(heml::BUILD_FINGERPRINT).on_state_form(heml::page::increment, counter.clone(), increment),
+            Native::new("/", move |input, problem| heml::render(&page_with(input, problem))),
+        ),
+    )
+    .merge(hemx_axum::runtime_route())
+```
+
 Use the **same validation and mutation operation** for native and enhanced
 requests. Decode and authorize the input, validate it, and mutate once; only then
 choose a representation of the result. Do not maintain a second enhanced-only
@@ -153,8 +173,53 @@ automatically replays it as a native POST**: the server may already have mutated
 The application must offer an explicit recovery action and use its own
 idempotency policy where retrying a mutation is appropriate.
 
-## Bounded multipart input
+## At-most-once enhanced actions
 
+`action_with_ledger(registry, native, ledger)` makes the browser runtime's single
+resend safe. Each enhanced POST carries a random token. The first request with a
+token runs the handler as a detached task (a dropped connection cannot cancel it
+half-way) and the ledger records its complete response. Any later request with
+that token receives the recorded response and never runs the handler again;
+while the first still runs it receives **425** (`HEMX_SUBMISSION_PENDING` in the
+browser). All requests pass the usual extraction and dispatch guards before
+claiming or looking up a token: a missing or stale build receives 409, even if
+that token is already running or completed. A token sent to a different action
+is rejected with 400 before dispatch. If the handler panics (with panic
+unwinding enabled) or reading its response body fails, the detached task records
+a terminal 500 response, even after the client disconnects; resends replay that
+failure instead of running the handler again. Native submissions and requests
+without a token behave exactly like `action`, and plain `action` ignores tokens
+altogether.
+
+```rust,ignore
+hemx_axum::action_with_ledger(
+    registry,
+    Native::new("/", feedback),
+    MemoryLedger::new(LedgerLimits {
+        entries: 1024,
+        bytes: 1 << 20,
+        age: Duration::from_secs(600),
+    }),
+)
+```
+
+`Ledger` is an application trait (`claim` a token for an action, `record` its
+response and return what it kept). `Recorded::read(response).await` returns
+`Result<Recorded, axum::Error>`: custom ledger integrations must handle body-read
+errors rather than keeping an incomplete successful response. `MemoryLedger`
+serves one process. It remembers each token for `age` and never forgets one
+earlier because of
+`entries` or `bytes` pressure; a new submission that would exceed either bound
+is refused with 503 before its handler runs. Each running token reserves room
+for a short 410 answer: a result that does not fit the remaining bytes is kept
+as that 410, and the first caller receives the same 410, so a resend never sees
+a different outcome. Several processes behind one address need a `Ledger` on
+shared storage; keep `age` above an action's browser deadline, because a token
+forgotten after `age` counts as a new submission. The ledger deduplicates resends
+of one submission; it is not authentication, authorization or CSRF protection,
+and two separate user submissions remain two mutations.
+
+## Bounded multipart input
 
 Keep Axum's whole-request limit. Add `MultipartLimits` when text/name bytes and
 file contents need separate cumulative budgets:
@@ -228,7 +293,7 @@ form without the runtime receives the plain 409 text; render your own reload pag
 if that matters. A 409 without the server's fingerprint header is treated as an
 ordinary application conflict.
 
-Both checks are unreleased: Hemx 0.4.0 applies neither.
+Hemx 0.6.0 applies both checks; Hemx 0.4.0 applied neither.
 
 ## License
 

@@ -531,6 +531,65 @@ struct CreateTodo {}
 }
 
 #[test]
+fn form_struct_rejects_field_without_template_control() {
+    let fixture = Fixture::new("hemx-derive-form-struct-extra-field-fail");
+    fixture.write(
+        "Cargo.toml",
+        &format!(
+            r#"[package]
+name = "hemx-derive-form-struct-extra-field-fail"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+hemx = {{ path = {:?} }}
+"#,
+            repo_path("hemx")
+        ),
+    );
+    fixture.write(
+        "build.rs",
+        r#"fn main() {
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(
+        out.join("hemx.syms"),
+        "hemx-syms-v1\nform\titem_actions.heml::item_command\titem_command\t1\nform_field\titem_command\ttitle\ttrue\tfalse\n",
+    )
+    .unwrap();
+}
+"#,
+    );
+    // `command` would come from a submitter rendered by a nested child view.
+    fixture.write(
+        "src/lib.rs",
+        r#"#[hemx::form("item_command")]
+struct Command {
+    title: String,
+    command: String,
+}
+"#,
+    );
+
+    let output = check_fixture(&fixture);
+
+    assert!(!output.status.success(), "fixture unexpectedly compiled");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "hemx form `item_command` field `command` has no form control in `item_actions.heml`"
+        ),
+        "missing control diagnostic in stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("E0063"),
+        "indirect initializer error:\n{stderr}"
+    );
+}
+
+#[test]
 fn form_struct_rejects_wrong_optionality_and_multiplicity() {
     let fixture = Fixture::new("hemx-derive-form-struct-shape-fail");
     fixture.write(

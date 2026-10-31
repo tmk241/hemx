@@ -15,14 +15,16 @@ mod authoring;
 #[cfg(test)]
 mod contract_tests;
 mod rust_source;
+mod transform;
 
 use artifact::{
     collect_input_files, generated_targets, parse_error, unkeyed_generated_target_diagnostics,
     write_if_changed, Resources,
 };
 use authoring::{
-    reject_invalid_hemx_attr_placement, reject_invalid_hemx_attr_values,
-    reject_selector_target_attrs, reject_unkeyed_loop, reject_unknown_hemx_attrs,
+    reject_dynamic_resource_attrs, reject_invalid_hemx_attr_placement,
+    reject_invalid_hemx_attr_values, reject_selector_target_attrs, reject_self_closing_action_form,
+    reject_unkeyed_loop, reject_unknown_hemx_attrs,
 };
 #[cfg(test)]
 use rust_source::{
@@ -78,8 +80,9 @@ impl std::fmt::Display for Diagnostic {
 pub struct AppBuilder {
     out_dir: Option<PathBuf>,
     template_dir: PathBuf,
-    global_exports: bool,
     surfaces: Vec<(PathBuf, SurfaceDocument)>,
+    manifest_dir: Option<PathBuf>,
+    check_format: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,13 +193,18 @@ impl AppBuilder {
         self
     }
 
+    /// Select templates/ or a subdirectory beneath the package root.
+    /// Files outside that tree cannot receive Hemplate derive transforms and
+    /// are rejected by [`Self::run`] with a source-path diagnostic.
     pub fn template_dir(mut self, template_dir: impl Into<PathBuf>) -> Self {
         self.template_dir = template_dir.into();
         self
     }
 
-    pub fn global_exports(mut self, enabled: bool) -> Self {
-        self.global_exports = enabled;
+    /// Require canonical Hemplate layout (enabled by default).
+    /// Set to `false` only when the application explicitly opts out.
+    pub fn check_format(mut self, check: bool) -> Self {
+        self.check_format = check;
         self
     }
 
@@ -205,8 +213,48 @@ impl AppBuilder {
         self
     }
 
+    /// Package root whose `templates/` the Hemplate derive reads; tests only.
+    #[cfg(test)]
+    pub(crate) fn manifest_dir(mut self, manifest_dir: impl Into<PathBuf>) -> Self {
+        self.manifest_dir = Some(manifest_dir.into());
+        self
+    }
+
     pub fn run(self) -> io::Result<()> {
         println!("cargo:rerun-if-changed={}", self.template_dir.display());
+
+        let input_paths = collect_input_files(&self.template_dir)?;
+        if self.check_format {
+            let mut paths: BTreeSet<_> = input_paths
+                .iter()
+                .filter(|path| {
+                    path.extension().and_then(|extension| extension.to_str()) == Some("heml")
+                })
+                .collect();
+            paths.extend(
+                self.surfaces
+                    .iter()
+                    .map(|(path, _)| path)
+                    .filter(|path| path.is_file()),
+            );
+            let mut failures = Vec::new();
+            for path in paths {
+                let source = std::fs::read_to_string(path)?;
+                match hemplate_fmt::format_heml(&source, path) {
+                    Ok(formatted) if formatted != source => {
+                        failures.push(path.display().to_string())
+                    }
+                    Err(error) => failures.push(error.to_string()),
+                    Ok(_) => {}
+                }
+            }
+            if !failures.is_empty() {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, format!(
+                    "templates are not in canonical Hemplate layout:\n{}\nrun `hemplate-fmt templates` to format them",
+                    failures.join("\n")
+                )));
+            }
+        }
 
         let out_dir = self
             .out_dir
@@ -219,18 +267,36 @@ impl AppBuilder {
         std::fs::create_dir_all(&out_dir)?;
 
         let mut resources = Resources::default();
-        let input_paths = collect_input_files(&self.template_dir)?;
+        let mut templates = Vec::new();
         if self.surfaces.is_empty() {
             for path in input_paths.iter().filter(|path| {
                 path.extension().and_then(|extension| extension.to_str()) == Some("heml")
             }) {
                 let source = std::fs::read_to_string(path)?;
-                let surface = surface_for_heml_source(path, source)?;
+                let surface = surface_for_heml_source(path, source.clone())?;
                 resources.add_surface(&self.template_dir, path, &surface)?;
+                templates.push((path, source, surface));
             }
         } else {
             for (path, surface) in &self.surfaces {
                 resources.add_surface(&self.template_dir, path, surface)?;
+                // The derive compiles the template file, so its transform must
+                // come from that source. A surface without a file renders nowhere.
+                let source = match std::fs::read_to_string(path) {
+                    Ok(source) => source,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
+                if surface_for_heml_source(path, source.clone())? != *surface {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "{}: the supplied surface does not match the template source",
+                            path.display()
+                        ),
+                    ));
+                }
+                templates.push((path, source, surface.clone()));
             }
         }
         for path in input_paths.iter().filter(|path| {
@@ -243,26 +309,79 @@ impl AppBuilder {
             resources.add_stylesheet(&self.template_dir, path, &source)?;
         }
 
+        // Hemplate resolves transforms only beneath the package's templates/.
+        // Reject unsupported inputs before publishing an unusable contract.
+        let manifest = self.manifest_dir.clone().unwrap_or_else(manifest_dir);
+        let templates_root = std::path::absolute(manifest.join("templates"))?;
+        let templates = templates
+            .into_iter()
+            .map(|(path, source, surface)| {
+                let absolute = std::path::absolute(path)?;
+                let relative = absolute.strip_prefix(&templates_root).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "{}: Hemplate's derive reads transforms only for templates/ under {}; move the template into {} and set template_dir to that directory or a subdirectory",
+                            path.display(),
+                            manifest.display(),
+                            templates_root.display()
+                        ),
+                    )
+                })?;
+                Ok((relative.to_path_buf(), source, surface))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+
         write_if_changed(
             &out_dir.join("hemx.generated.rs"),
-            resources.generated_rs(self.global_exports).as_bytes(),
+            resources.generated_rs().as_bytes(),
         )?;
         write_if_changed(&out_dir.join("hemx.syms"), resources.syms().as_bytes())?;
+
+        // Hemplate's derive applies these edits while compiling each template,
+        // so plain rendering already yields final markers and action fields.
+        let transforms = out_dir.join("hemplate-transform");
+        let fingerprint = hemx_core::BuildFingerprint::from_parts(&resources.fingerprint_parts()).0;
+        for (relative, source, surface) in &templates {
+            let transform = transform::template_transform(&resources, fingerprint, source, surface);
+            let encoded = transform
+                .encode()
+                .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?;
+            let file = hemplate_core::transform::path_for(&transforms, relative);
+            if let Some(parent) = file.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            write_if_changed(&file, encoded.as_bytes())?;
+        }
+        println!(
+            "cargo:rustc-env={}={}",
+            hemplate_core::transform::DIR_ENV,
+            transforms.display()
+        );
         Ok(())
     }
+}
+
+fn manifest_dir() -> PathBuf {
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 pub fn app() -> AppBuilder {
     AppBuilder {
         out_dir: None,
         template_dir: PathBuf::from("templates"),
-        global_exports: false,
         surfaces: Vec::new(),
+        manifest_dir: None,
+        check_format: true,
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Older resource/diagnostic fixtures exercise template semantics, not layout;
+    // their builders explicitly opt out. The format tests below use the default.
     use crate::artifact::*;
 
     static OUT_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -532,7 +651,10 @@ mod tests {
         );
         assert_eq!(data_param_ident("data-item-id"), None);
         assert_eq!(data_param_ident("aria-label"), None);
-        assert_eq!(app().template_dir, PathBuf::from("templates"));
+        assert_eq!(
+            app().check_format(false).template_dir,
+            PathBuf::from("templates")
+        );
         assert_eq!(nearest_dir_with(Path::new("/"), "hemx-absent-marker"), None);
 
         let mut exports = String::new();
@@ -716,8 +838,11 @@ mod tests {
         ];
         assert_eq!(resources.fingerprint_parts(), expected_parts);
 
-        let generated = resources.generated_rs(false);
+        let generated = resources.generated_rs();
         assert!(generated.starts_with("// @generated by hemx-build. Do not edit.\n"));
+        // Only the surface module declares the marker the generated file needs.
+        assert!(generated
+            .contains("\nconst _: () = self::__hemx_surface::INCLUDE_THROUGH_HEMX_SURFACE;\n"));
         assert!(generated.contains("pub const BUILD_FINGERPRINT"));
         assert!(generated.contains("\n#[allow(non_upper_case_globals)]\npub mod page {\n"));
         assert!(generated.contains("pub const slot: SlotTarget"));
@@ -725,9 +850,9 @@ mod tests {
         assert!(generated.contains("pub const profile: ::hemx::Form"));
         assert!(generated.contains("\n    pub mod targets {\n"));
 
-        let generated_with_globals = resources.generated_rs(true);
-        assert!(generated_with_globals.contains("pub mod advanced {"));
-        assert!(generated_with_globals.contains("pub mod slots {"));
+        // Resources exist only below their template's module, never as crate-wide aliases.
+        assert!(!generated.contains("\npub mod advanced {"));
+        assert!(!generated.contains("\npub mod components {"));
 
         let mut row_slot = resource("row", "row", 21);
         row_slot.role = SlotRole::Row;
@@ -788,18 +913,12 @@ mod tests {
             .entry("save".into())
             .or_default()
             .insert("item_id".into());
-        let canonical_generated = resources.generated_rs(false);
-        let canonical_globals = resources.generated_rs(true);
+        let canonical_generated = resources.generated_rs();
         let canonical_syms = resources.syms();
         assert_eq!(
             stable_id("generated-rs", &canonical_generated),
-            1_958_256_377,
+            3_810_834_957,
             "canonical generated Rust changed"
-        );
-        assert_eq!(
-            stable_id("generated-rs-global", &canonical_globals),
-            2_790_822_348,
-            "canonical global-export Rust changed"
         );
         assert_eq!(
             stable_id("generated-syms", &canonical_syms),
@@ -818,13 +937,13 @@ mod tests {
         let out = root.join("out");
         std::fs::create_dir_all(out.join("hemx.generated.rs")).unwrap();
 
-        let result = std::panic::catch_unwind(|| app().out_dir(&out).run());
+        let result = std::panic::catch_unwind(|| app().check_format(false).out_dir(&out).run());
         assert!(result.is_ok(), "ordinary output errors must not panic");
         assert!(result.unwrap().is_err());
 
         std::fs::remove_dir_all(out.join("hemx.generated.rs")).unwrap();
         std::fs::create_dir_all(out.join("hemx.syms")).unwrap();
-        let result = std::panic::catch_unwind(|| app().out_dir(&out).run());
+        let result = std::panic::catch_unwind(|| app().check_format(false).out_dir(&out).run());
         assert!(result.is_ok(), "symbol output errors must not panic");
         assert!(result.unwrap().is_err());
 
@@ -839,7 +958,9 @@ mod tests {
         )
         .unwrap();
         let error = app()
+            .check_format(false)
             .template_dir(&templates)
+            .manifest_dir(&root)
             .out_dir(&invalid_out)
             .run()
             .unwrap_err();
@@ -856,7 +977,9 @@ mod tests {
         )
         .unwrap();
         let error = app()
+            .check_format(false)
             .template_dir(&templates)
+            .manifest_dir(&root)
             .out_dir(&invalid_out)
             .run()
             .unwrap_err();
@@ -886,7 +1009,13 @@ mod tests {
         std::fs::write(nested.join("theme.scss"), ".nested-scss {}").unwrap();
         std::fs::write(nested.join("ignored.txt"), [0xff]).unwrap();
 
-        app().template_dir(&templates).out_dir(&out).run().unwrap();
+        app()
+            .check_format(false)
+            .template_dir(&templates)
+            .manifest_dir(&base)
+            .out_dir(&out)
+            .run()
+            .unwrap();
         let syms = std::fs::read_to_string(out.join("hemx.syms")).unwrap();
         assert!(syms.contains("slot\tnested/panel.heml::nested_panel\tnested_panel\t"));
         assert!(syms.contains("class\tnested/panel.css::nested-css\tnested_css\tnested-css\n"));
@@ -895,6 +1024,7 @@ mod tests {
         let missing = base.join("missing");
         let missing_out = base.join("missing-out");
         app()
+            .check_format(false)
             .template_dir(&missing)
             .out_dir(&missing_out)
             .run()
@@ -908,7 +1038,7 @@ mod tests {
         let previous_out_dir = std::env::var_os("OUT_DIR");
         let env_out = base.join("env-out");
         std::env::set_var("OUT_DIR", &env_out);
-        let env_result = app().template_dir(&missing).run();
+        let env_result = app().check_format(false).template_dir(&missing).run();
         match previous_out_dir {
             Some(value) => std::env::set_var("OUT_DIR", value),
             None => std::env::remove_var("OUT_DIR"),
@@ -919,6 +1049,7 @@ mod tests {
         let template_file = base.join("not-a-directory");
         std::fs::write(&template_file, "not a directory").unwrap();
         let error = app()
+            .check_format(false)
             .template_dir(&template_file)
             .out_dir(base.join("file-root-out"))
             .run()
@@ -938,6 +1069,7 @@ mod tests {
             std::fs::set_permissions(&restricted_nested, std::fs::Permissions::from_mode(0o000))
                 .unwrap();
             let error = app()
+                .check_format(false)
                 .template_dir(&restricted_root)
                 .out_dir(base.join("restricted-out"))
                 .run()
@@ -952,6 +1084,7 @@ mod tests {
         std::fs::write(invalid_heml.join("bad.heml"), [0xff]).unwrap();
         assert_eq!(
             app()
+                .check_format(false)
                 .template_dir(&invalid_heml)
                 .out_dir(base.join("invalid-heml-out"))
                 .run()
@@ -965,6 +1098,7 @@ mod tests {
         std::fs::write(invalid_css.join("bad.css"), [0xff]).unwrap();
         assert_eq!(
             app()
+                .check_format(false)
                 .template_dir(&invalid_css)
                 .out_dir(base.join("invalid-css-out"))
                 .run()
@@ -976,6 +1110,7 @@ mod tests {
         let blocked_out = base.join("blocked-out");
         std::fs::write(&blocked_out, "not a directory").unwrap();
         assert!(app()
+            .check_format(false)
             .template_dir(&missing)
             .out_dir(&blocked_out)
             .run()
@@ -988,6 +1123,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             app()
+                .check_format(false)
                 .surface("explicit.heml", explicit_surface)
                 .out_dir(base.join("explicit-out"))
                 .run()
@@ -1001,7 +1137,7 @@ mod tests {
         std::fs::write(ordered.join("a.css"), ".foo-bar {}").unwrap();
         std::fs::write(ordered.join("b.css"), ".foo_bar {}").unwrap();
         assert_eq!(
-            app()
+            app().check_format(false)
                 .template_dir(&ordered)
                 .out_dir(base.join("ordered-out"))
                 .run()
@@ -1026,14 +1162,26 @@ mod tests {
         )
         .unwrap();
 
-        app().template_dir(&templates).out_dir(&out).run().unwrap();
+        app()
+            .check_format(false)
+            .template_dir(&templates)
+            .manifest_dir(&base)
+            .out_dir(&out)
+            .run()
+            .unwrap();
         let generated = out.join("hemx.generated.rs");
         let symbols = out.join("hemx.syms");
         let generated_modified = std::fs::metadata(&generated).unwrap().modified().unwrap();
         let symbols_modified = std::fs::metadata(&symbols).unwrap().modified().unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(20));
-        app().template_dir(&templates).out_dir(&out).run().unwrap();
+        app()
+            .check_format(false)
+            .template_dir(&templates)
+            .manifest_dir(&base)
+            .out_dir(&out)
+            .run()
+            .unwrap();
 
         assert_eq!(
             std::fs::metadata(generated).unwrap().modified().unwrap(),
@@ -1062,7 +1210,13 @@ mod tests {
         )
         .unwrap();
 
-        app().template_dir(&templates).out_dir(&out).run().unwrap();
+        app()
+            .check_format(false)
+            .template_dir(&templates)
+            .manifest_dir(&base)
+            .out_dir(&out)
+            .run()
+            .unwrap();
         let initial_generated = std::fs::read_to_string(out.join("hemx.generated.rs")).unwrap();
         let initial_symbols = std::fs::read_to_string(out.join("hemx.syms")).unwrap();
         assert!(initial_generated.contains("pub const save"));
@@ -1073,7 +1227,13 @@ mod tests {
             r#"<button data-hemx-handle="cancel">Cancel</button>"#,
         )
         .unwrap();
-        app().template_dir(&templates).out_dir(&out).run().unwrap();
+        app()
+            .check_format(false)
+            .template_dir(&templates)
+            .manifest_dir(&base)
+            .out_dir(&out)
+            .run()
+            .unwrap();
 
         let refreshed_generated = std::fs::read_to_string(out.join("hemx.generated.rs")).unwrap();
         let refreshed_symbols = std::fs::read_to_string(out.join("hemx.syms")).unwrap();
@@ -1101,16 +1261,17 @@ mod tests {
         std::fs::write(templates.join("todo.css"), ".todo-card { display: block; }").unwrap();
 
         app()
+            .check_format(false)
             .template_dir(&templates)
+            .manifest_dir(&base)
             .out_dir(&out)
-            .global_exports(true)
             .run()
             .unwrap();
 
         let generated = std::fs::read_to_string(out.join("hemx.generated.rs")).unwrap();
-        assert!(generated.contains("pub mod components"));
+        assert!(!generated.contains("pub mod components"));
         assert!(generated.contains(
-            "pub const todo: ::hemx::ComponentRef = ::hemx::ComponentRef::new(\"todo\")"
+            "pub const COMPONENT: ::hemx::ComponentRef = ::hemx::ComponentRef::new(\"todo\")"
         ));
         assert!(generated.contains("pub mod advanced"));
         assert!(generated.contains("pub mod slots"));
@@ -1156,30 +1317,25 @@ mod tests {
         assert!(generated.contains("pub const new_todo"));
         assert!(generated.contains("pub mod todo"));
         assert!(generated.contains("pub const ALL_IDS"));
-        assert!(generated.contains(
-            "pub fn lower(html: impl ::std::convert::AsRef<str>) -> ::std::string::String"
-        ));
-        assert!(generated.contains("#[doc(hidden)]\npub fn lower_html"));
-        assert!(generated.contains("pub fn static_fragment(html: &'static str) -> ::hemx::Html"));
-        assert!(generated.contains(
-            "#[doc(hidden)]\npub fn render(view: &impl ::hemplate::Hemplate) -> ::hemx::Html"
-        ));
-        assert!(generated.contains("pub fn page(view: &impl ::hemplate::Hemplate) -> ::hemx::Html"));
-        assert!(generated.contains(
-            "#[doc(hidden)]\npub fn render_html(view: &impl ::hemplate::Hemplate) -> ::hemx::Html"
-        ));
+        // Rendering is the only view boundary; no post-render rewriting API remains.
+        for removed in [
+            "fn lower(",
+            "fn lower_html(",
+            "fn static_fragment(",
+            "__hemx_lower_html",
+            "__HEMX_LOWERING_TABLE",
+        ] {
+            assert!(!generated.contains(removed), "{removed}");
+        }
+        assert!(
+            generated.contains("\npub fn render(view: &impl ::hemplate::Hemplate) -> ::hemx::Html")
+        );
+        assert!(!generated.contains("fn page("));
         assert!(generated.contains("pub fn put<T>(slot: ::hemx::advanced::Slot<T>, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect"));
         assert!(
             !generated.contains("pub fn append<K, T>")
                 && !generated.contains("pub fn prepend<K, T>")
         );
-        assert!(generated.contains("pub fn replace<K, T>(slot: ::hemx::advanced::KeyedSlot<K, T>, key: K, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect"));
-        assert!(generated.contains("data-hemx-slot"));
-        assert!(generated.contains("data-hemx-form"));
-        assert!(generated.contains("data-hemx-resource"));
-        assert!(!generated.contains("data-sid"));
-        assert!(!generated.contains("data-fid"));
-        assert!(generated.contains("__hemx_inject_handle_inputs"));
 
         let syms = std::fs::read_to_string(out.join("hemx.syms")).unwrap();
         for line in [
@@ -1260,7 +1416,9 @@ mod tests {
         let invalid_stylesheet = templates.join("123.css");
         std::fs::write(&invalid_stylesheet, ".valid {}").unwrap();
         let invalid_stylesheet_name = app()
+            .check_format(false)
             .template_dir(&templates)
+            .manifest_dir(&base)
             .out_dir(&out)
             .run()
             .unwrap_err();
@@ -1274,7 +1432,9 @@ mod tests {
         let invalid_class_template = templates.join("invalid_class.heml");
         std::fs::write(&invalid_class_template, r#"<div class="123"></div>"#).unwrap();
         let invalid_class = app()
+            .check_format(false)
             .template_dir(&templates)
+            .manifest_dir(&base)
             .out_dir(&out)
             .run()
             .unwrap_err();
@@ -1288,7 +1448,9 @@ mod tests {
         let stylesheet = templates.join("app.css");
         std::fs::write(&stylesheet, ".foo-bar {} .foo_bar {}").unwrap();
         let class_error = app()
+            .check_format(false)
             .template_dir(&templates)
+            .manifest_dir(&base)
             .out_dir(&out)
             .run()
             .unwrap_err();
@@ -1306,7 +1468,9 @@ mod tests {
         )
         .unwrap();
         let invalid_form = app()
+            .check_format(false)
             .template_dir(&templates)
+            .manifest_dir(&base)
             .out_dir(&out)
             .run()
             .unwrap_err();
@@ -1327,7 +1491,9 @@ mod tests {
         )
         .unwrap();
         let form_error = app()
+            .check_format(false)
             .template_dir(&templates)
+            .manifest_dir(&base)
             .out_dir(&out)
             .run()
             .unwrap_err();
@@ -1343,7 +1509,13 @@ mod tests {
             r#"<form data-hemx-handle="save_name" data-hemx-form="profile"><input name="name" required></form><form data-hemx-handle="save_again" data-hemx-form="profile"><input name="name" required></form>"#,
         )
         .unwrap();
-        app().template_dir(&templates).out_dir(&out).run().unwrap();
+        app()
+            .check_format(false)
+            .template_dir(&templates)
+            .manifest_dir(&base)
+            .out_dir(&out)
+            .run()
+            .unwrap();
         let syms = std::fs::read_to_string(out.join("hemx.syms")).unwrap();
         assert_eq!(
             syms.matches("form_field\tprofile\tname\ttrue\tfalse\n")
@@ -1367,7 +1539,13 @@ mod tests {
         )
         .unwrap();
 
-        app().template_dir(&templates).out_dir(&out).run().unwrap();
+        app()
+            .check_format(false)
+            .template_dir(&templates)
+            .manifest_dir(&base)
+            .out_dir(&out)
+            .run()
+            .unwrap();
 
         let generated = std::fs::read_to_string(out.join("hemx.generated.rs")).unwrap();
         assert!(generated.contains("pub const row: ::hemx::advanced::Slot"));
@@ -1390,15 +1568,59 @@ mod tests {
             r#"<button data-hemx-handle="create" data-hemx-on="click">Create</button><div data-hemx-slot="todos"></div>"#
                 .to_string(),
         );
-        let ast = build_ast(source).unwrap().unwrap();
+        let ast = build_ast(Arc::clone(&source)).unwrap().unwrap();
         let surface = extract_surface(&ast);
 
         app()
+            .check_format(false)
             .template_dir(&templates)
+            .manifest_dir(&base)
             .out_dir(&out)
-            .surface(&path, surface)
+            .surface(&path, surface.clone())
             .run()
             .unwrap();
+
+        // A template file with a supplied surface gets exactly the transform a
+        // scanned one gets, so plain rendering still yields final markers.
+        std::fs::write(&path, source.as_str()).unwrap();
+        let supplied = base.join("supplied");
+        let scanned = base.join("scanned");
+        app()
+            .check_format(false)
+            .template_dir(&templates)
+            .manifest_dir(&base)
+            .out_dir(&supplied)
+            .surface(&path, surface.clone())
+            .run()
+            .unwrap();
+        app()
+            .check_format(false)
+            .template_dir(&templates)
+            .manifest_dir(&base)
+            .out_dir(&scanned)
+            .run()
+            .unwrap();
+        let transform = |out: &Path| {
+            std::fs::read(hemplate_core::transform::path_for(
+                &out.join("hemplate-transform"),
+                Path::new("todo.heml"),
+            ))
+            .unwrap()
+        };
+        assert_eq!(transform(&supplied), transform(&scanned));
+        let mut stale = surface.clone();
+        stale.nodes.clear();
+        let error = app()
+            .check_format(false)
+            .template_dir(&templates)
+            .manifest_dir(&base)
+            .out_dir(base.join("stale"))
+            .surface(&path, stale)
+            .run()
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("does not match the template source"));
 
         let generated = std::fs::read_to_string(out.join("hemx.generated.rs")).unwrap();
         assert!(generated.contains("pub mod todo"));
@@ -1425,25 +1647,21 @@ mod tests {
         )
         .unwrap();
 
-        app().template_dir(&templates).out_dir(&out).run().unwrap();
+        app()
+            .check_format(false)
+            .template_dir(&templates)
+            .manifest_dir(&base)
+            .out_dir(&out)
+            .run()
+            .unwrap();
 
         let generated = std::fs::read_to_string(out.join("hemx.generated.rs")).unwrap();
         assert!(!generated.contains("\n#[allow(non_upper_case_globals)]\npub mod components"));
         assert!(!generated.contains("\n#[allow(non_upper_case_globals)]\npub mod slots"));
-        assert!(generated.contains(
-            "\npub fn lower(html: impl ::std::convert::AsRef<str>) -> ::std::string::String"
-        ));
-        assert!(generated.contains("\n#[doc(hidden)]\npub fn lower_html"));
-        assert!(generated.contains("\npub fn static_fragment(html: &'static str) -> ::hemx::Html"));
-        assert!(generated.contains(
-            "\n#[doc(hidden)]\npub fn render(view: &impl ::hemplate::Hemplate) -> ::hemx::Html"
-        ));
         assert!(
-            generated.contains("\npub fn page(view: &impl ::hemplate::Hemplate) -> ::hemx::Html")
+            generated.contains("\npub fn render(view: &impl ::hemplate::Hemplate) -> ::hemx::Html")
         );
-        assert!(generated.contains("\n#[doc(hidden)]\npub fn render_html(view: &impl ::hemplate::Hemplate) -> ::hemx::Html"));
         assert!(generated.contains("\npub fn put<T>(slot: ::hemx::advanced::Slot<T>, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect"));
-        assert!(generated.contains("\npub fn replace<K, T>(slot: ::hemx::advanced::KeyedSlot<K, T>, key: K, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect"));
         assert!(generated.contains("pub mod todo"));
         assert!(generated.contains(
             "    pub const COMPONENT: ::hemx::ComponentRef = ::hemx::ComponentRef::new(\"todo\")"
@@ -1453,19 +1671,9 @@ mod tests {
         assert!(generated.contains("    pub mod targets"));
         assert!(generated.contains("    pub const todos: SlotTarget<::std::string::String> = SlotTarget::new(super::advanced::slots::todos);"));
         assert!(generated.contains("    pub use self::targets::todos;"));
-        assert!(generated.contains("    #[doc(hidden)]\n    pub fn lower_html"));
-        assert!(generated.contains(
-            "    #[doc(hidden)]\n    pub fn render(view: &impl ::hemplate::Hemplate) -> ::hemx::Html"
-        ));
-        assert!(
-            generated.contains("    pub fn page(view: &impl ::hemplate::Hemplate) -> ::hemx::Html")
-        );
-        assert!(generated.contains("    #[doc(hidden)]\n    pub fn render_html(view: &impl ::hemplate::Hemplate) -> ::hemx::Html"));
-        assert!(
-            generated.contains("    pub fn static_fragment(html: &'static str) -> ::hemx::Html")
-        );
-        assert!(generated.contains("    pub fn put<T>(slot: ::hemx::advanced::Slot<T>, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect"));
-        assert!(generated.contains("    pub fn replace<K, T>(slot: ::hemx::advanced::KeyedSlot<K, T>, key: K, view: &impl ::hemplate::Hemplate) -> ::hemx::advanced::Effect"));
+        // Template modules share the one renderer instead of copying it.
+        assert!(generated.contains("    pub(crate) use super::{put, render};"));
+        assert!(!generated.contains("    pub fn render("));
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1497,7 +1705,13 @@ mod tests {
         )
         .unwrap();
 
-        app().template_dir(&templates).out_dir(&out).run().unwrap();
+        app()
+            .check_format(false)
+            .template_dir(&templates)
+            .manifest_dir(&base)
+            .out_dir(&out)
+            .run()
+            .unwrap();
 
         let generated = std::fs::read_to_string(out.join("hemx.generated.rs")).unwrap();
         assert!(generated.contains("pub const PROFILE_CONTRACT: ::hemx::FormContract"));
@@ -1567,9 +1781,10 @@ mod tests {
         .unwrap();
 
         app()
+            .check_format(false)
             .template_dir(&templates)
+            .manifest_dir(&base)
             .out_dir(&out)
-            .global_exports(true)
             .run()
             .unwrap();
 
@@ -1627,18 +1842,19 @@ mod hemx {{
     pub struct Html(SafeHtml);
     impl ::std::convert::From<Html> for SafeHtml {{ fn from(value: Html) -> Self {{ value.0 }} }}
     impl ::std::convert::AsRef<str> for Html {{ fn as_ref(&self) -> &str {{ "" }} }}
-    pub mod __private {{ pub fn html_trusted(html: impl Into<String>) -> super::Html {{ super::Html(super::SafeHtml::trusted(html)) }} }}
+    impl Html {{ pub fn __rendered(html: impl Into<String>, _: BuildFingerprint) -> Self {{ Self(SafeHtml::trusted(html)) }} }}
     pub mod advanced {{ pub use super::*; }}
     pub struct FormContract {{ pub fields: &'static [FormField] }}
     pub struct FormField {{ pub name: &'static str, pub kind: FormControlKind, pub required: bool }}
     pub enum FormControlKind {{ Text, Number {{ min: Option<&'static str>, max: Option<&'static str>, step: Option<&'static str> }}, Checkbox, Radio, Select {{ multiple: bool }}, TextArea, File, Hidden, Submit, Other {{ tag: &'static str, input_type: Option<&'static str> }} }}
 }}
 mod hemplate {{
-    pub trait Hemplate {{ fn render_into(&self, out: &mut String) -> Result<(), ()>; }}
+    pub trait Hemplate {{ fn render_into(&self, out: &mut String) -> Result<(), ()>; fn size_hint(&self) -> usize {{ 0 }} }}
 }}
+mod __hemx_surface {{ pub const INCLUDE_THROUGH_HEMX_SURFACE: () = (); }}
 {generated}
 fn main() {{
-    assert_eq!(classes::drag_handle.as_str(), "drag-handle");
+    assert_eq!(card::classes::drag_handle.as_str(), "drag-handle");
     assert_eq!(card::classes::is_active.as_str(), "is-active");
     assert_eq!(panel::classes::panel_shell.as_str(), "panel-shell");
 }}
@@ -1646,7 +1862,7 @@ fn main() {{
         );
         let source_path = base.join("classes.rs");
         let bin_path = base.join("classes-bin");
-        std::fs::write(&source_path, source).unwrap();
+        std::fs::write(&source_path, &source).unwrap();
         let status = std::process::Command::new("rustc")
             .arg(&source_path)
             .arg("-o")
@@ -1656,6 +1872,18 @@ fn main() {{
         assert!(status.success());
         let status = std::process::Command::new(&bin_path).status().unwrap();
         assert!(status.success());
+
+        // Included anywhere but the surface module, the generated file does not compile.
+        let marker = "mod __hemx_surface { pub const INCLUDE_THROUGH_HEMX_SURFACE: () = (); }\n";
+        std::fs::write(&source_path, source.replace(marker, "")).unwrap();
+        let output = std::process::Command::new("rustc")
+            .arg(&source_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("__hemx_surface"));
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1903,7 +2131,9 @@ fn main() {{
             std::fs::write(templates.join("todo.heml"), template).unwrap();
 
             let err = app()
+                .check_format(false)
                 .template_dir(&templates)
+                .manifest_dir(&base)
                 .out_dir(&out)
                 .run()
                 .unwrap_err();
@@ -1939,7 +2169,13 @@ fn main() {{
             </main>
         "#;
         std::fs::write(templates.join("todo.heml"), keyed_source).unwrap();
-        app().template_dir(&templates).out_dir(&out).run().unwrap();
+        app()
+            .check_format(false)
+            .template_dir(&templates)
+            .manifest_dir(&base)
+            .out_dir(&out)
+            .run()
+            .unwrap();
         let syms = std::fs::read_to_string(out.join("hemx.syms")).unwrap();
         assert!(syms.contains("slot\ttodo.heml::todos\ttodos\t"));
         assert!(syms.contains("slot\ttodo.heml::todo_row\ttodo_row\t"));
@@ -2021,7 +2257,9 @@ fn main() {{
             std::fs::write(&template_path, template).unwrap();
 
             let err = app()
+                .check_format(false)
                 .template_dir(&templates)
+                .manifest_dir(&base)
                 .out_dir(&out)
                 .run()
                 .unwrap_err();
@@ -2053,7 +2291,9 @@ fn main() {{
         .unwrap();
 
         let err = app()
+            .check_format(false)
             .template_dir(&templates)
+            .manifest_dir(&base)
             .out_dir(&out)
             .run()
             .unwrap_err();
@@ -2178,7 +2418,9 @@ fn main() {{
             std::fs::write(&template_path, template).unwrap();
 
             let err = app()
+                .check_format(false)
                 .template_dir(&templates)
+                .manifest_dir(&base)
                 .out_dir(&out)
                 .run()
                 .unwrap_err();
@@ -2235,7 +2477,13 @@ fn main() {{
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&templates).unwrap();
         std::fs::write(templates.join("valid.heml"), valid_source).unwrap();
-        app().template_dir(&templates).out_dir(&out).run().unwrap();
+        app()
+            .check_format(false)
+            .template_dir(&templates)
+            .manifest_dir(&base)
+            .out_dir(&out)
+            .run()
+            .unwrap();
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -2287,8 +2535,8 @@ fn main() {{
             std::fs::create_dir_all(&templates).unwrap();
             std::fs::write(&template_path, template).unwrap();
 
-            let error = app()
-                .template_dir(&templates)
+            let error = app().check_format(false)
+                .template_dir(&templates).manifest_dir(&base)
                 .out_dir(&out)
                 .run()
                 .unwrap_err();
@@ -2321,7 +2569,13 @@ fn main() {{
             let _ = std::fs::remove_dir_all(&base);
             std::fs::create_dir_all(&templates).unwrap();
             std::fs::write(templates.join("placement.heml"), template).unwrap();
-            app().template_dir(&templates).out_dir(&out).run().unwrap();
+            app()
+                .check_format(false)
+                .template_dir(&templates)
+                .manifest_dir(&base)
+                .out_dir(&out)
+                .run()
+                .unwrap();
             let _ = std::fs::remove_dir_all(base);
         }
     }
@@ -2339,7 +2593,9 @@ fn main() {{
         )
         .unwrap();
         let error = app()
+            .check_format(false)
             .template_dir(&templates)
+            .manifest_dir(&base)
             .out_dir(base.join("out"))
             .run()
             .unwrap_err();
@@ -2357,102 +2613,163 @@ fn main() {{
     }
 
     #[test]
-    fn generated_lowering_preserves_native_interaction_contract() {
-        let base = test_dir("hemx-build-lowering-test");
+    fn compile_time_lowering_preserves_native_interaction_contract() {
+        let source = r#"<main data-hemx-root><a href="/docs">Docs</a><form action="/todos" method="post" data-hemx-handle="create"><label for="title">Title</label><input id="title" name="title" aria-invalid="true" aria-describedby="title-error"><span id="title-error">Required</span><button data-hemx-on="click">Create</button></form><form action="/search" method="get"><input name="q"></form><li data-hemx-slot="row" h-key="7"></li><form data-hemx-handle="own"><input type="hidden" name="__b" value="1"></form></main>"#;
+        let path = Path::new("templates/todo.heml");
+        let surface = surface_for_heml_source(path, source.to_owned()).unwrap();
+        let mut resources = Resources::default();
+        resources
+            .add_surface(Path::new("templates"), path, &surface)
+            .unwrap();
+        let transform = transform::template_transform(&resources, 4242, source, &surface);
+        assert_eq!(
+            transform.source_hash,
+            hemplate_core::transform::source_hash(source)
+        );
+        // Apply the edits as the derive macro places them, last first.
+        let mut html = source.to_owned();
+        for edit in transform.edits.iter().rev() {
+            html.replace_range(edit.range.clone(), &edit.text);
+        }
+        let create = resources.handles["create"].id;
+        assert!(html.contains(&format!(r#"data-hemx-action="{create}""#)));
+        assert!(html.contains(&format!(
+            r#"data-hemx-resource="{}""#,
+            resources.slots["row"].id
+        )));
+        assert!(html.contains(r#"data-hemx-key="7""#));
+        for unchanged in [
+            r#"data-hemx-root"#,
+            r#"data-hemx-on="click""#,
+            r#"<a href="/docs">"#,
+            r#"action="/todos" method="post""#,
+            r#"action="/search" method="get""#,
+            r#"aria-invalid="true""#,
+            r#"aria-describedby="title-error""#,
+            r#"id="title-error">Required"#,
+        ] {
+            assert!(html.contains(unchanged), "{unchanged}: {html}");
+        }
+        assert!(html.contains(&format!(
+            r#"data-hemx-action="{create}"><input type="hidden" name="__h" value="{create}"><input type="hidden" name="__b" value="4242">"#
+        )));
+        // only handled forms carry the build; the GET search form does not,
+        // and an authored field is kept rather than duplicated.
+        assert_eq!(html.matches(r#"name="__b""#).count(), 2, "{html}");
+        assert_eq!(
+            html.matches(r#"name="__b" value="4242""#).count(),
+            1,
+            "{html}"
+        );
+        assert!(!html.contains("h-key"));
+        assert!(!html.contains("data-hemx-slot") && !html.contains("data-hemx-handle"));
+    }
+
+    #[test]
+    fn self_closing_action_forms_fail_instead_of_losing_their_fields() {
+        let base = test_dir("hemx-build-self-closing-form-test");
         let templates = base.join("templates");
-        let out = base.join("out");
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&templates).unwrap();
-        std::fs::write(
-            templates.join("todo.heml"),
-            r#"<main data-hemx-root><a href="/docs">Docs</a><form action="/todos" method="post" data-hemx-handle="create"><label for="title">Title</label><input id="title" name="title" aria-invalid="true" aria-describedby="title-error"><span id="title-error">Required</span><button data-hemx-on="click">Create</button></form><form action="/search" method="get"><input name="q"></form><li data-hemx-slot="row" data-hemx-key="7"></li></main>"#,
-        )
-        .unwrap();
-
-        app().template_dir(&templates).out_dir(&out).run().unwrap();
-        let generated = std::fs::read_to_string(out.join("hemx.generated.rs")).unwrap();
-        assert!(generated.contains("fn __hemx_lower_html"));
-        let source = format!(
-            r###"
-#![allow(dead_code)]
-mod hemx {{
-    #[derive(Clone, Copy)] pub struct BuildFingerprint(pub u64);
-    impl BuildFingerprint {{ pub const fn from_parts(_: &[u32]) -> Self {{ Self(4242) }} }}
-    pub struct Effect;
-    #[derive(Clone, Copy)] pub struct ResourceId;
-    #[derive(Clone, Copy)] pub struct EventName(&'static str);
-    impl EventName {{ pub const fn new(name: &'static str) -> Self {{ Self(name) }} }}
-    pub trait IntoEffect {{}}
-    impl IntoEffect for Effect {{}}
-    pub trait GeneratedTarget {{ fn __hemx_resource_id(self) -> ResourceId; }}
-    pub trait KeyedPartial {{ fn hemx_key(&self) -> String; }}
-    #[derive(Clone, Copy)] pub struct Slot<T>(::std::marker::PhantomData<T>);
-    impl<T> Slot<T> {{ pub const fn new(_: u32) -> Self {{ Self(::std::marker::PhantomData) }} pub const fn id(self) -> ResourceId {{ ResourceId }} pub fn html(self, _: impl ::std::convert::Into<SafeHtml>) -> Effect {{ Effect }} pub fn text(self, _: impl ::std::string::ToString) -> Effect {{ Effect }} pub fn rows_html<O, K, H>(self, _: impl ::std::iter::IntoIterator<Item = O>, _: impl ::std::iter::IntoIterator<Item = (K, H)>) -> Effect {{ Effect }} pub fn rows_delta_html<B, A, K, H>(self, _: impl ::std::iter::IntoIterator<Item = B>, _: impl ::std::iter::IntoIterator<Item = A>, _: impl ::std::iter::IntoIterator<Item = (K, H)>) -> Effect {{ Effect }} }}
-    pub struct KeyedSlot<K, T>(::std::marker::PhantomData<(K, T)>); impl<K, T> Copy for KeyedSlot<K, T> {{}} impl<K, T> Clone for KeyedSlot<K, T> {{ fn clone(&self) -> Self {{ *self }} }}
-    impl<K, T> KeyedSlot<K, T> {{ pub const fn new(_: u32) -> Self {{ Self(::std::marker::PhantomData) }} pub const fn id(self) -> ResourceId {{ ResourceId }} pub fn replace_html(self, _: K, _: impl ::std::convert::Into<SafeHtml>) -> Effect {{ Effect }} pub fn remove(self, _: K) -> Effect {{ Effect }} pub fn move_before(self, _: K, _: K) -> Effect {{ Effect }} pub fn move_to_end(self, _: K) -> Effect {{ Effect }} }}
-    #[derive(Clone, Copy)] pub struct Handle<T>(::std::marker::PhantomData<T>);
-    impl<T> Handle<T> {{ pub const fn new(_: u32) -> Self {{ Self(::std::marker::PhantomData) }} }}
-    #[derive(Clone, Copy)] pub struct Form<T>(::std::marker::PhantomData<T>);
-    impl<T> Form<T> {{ pub const fn new(_: u32) -> Self {{ Self(::std::marker::PhantomData) }} }}
-    #[derive(Clone, Copy)] pub struct ComponentRef(&'static str);
-    impl ComponentRef {{ pub const fn new(name: &'static str) -> Self {{ Self(name) }} pub const fn as_str(self) -> &'static str {{ self.0 }} }}
-    pub struct SafeHtml(String);
-    impl SafeHtml {{ pub fn trusted(html: impl Into<String>) -> Self {{ Self(html.into()) }} }}
-    pub struct Html(SafeHtml);
-    impl ::std::convert::From<Html> for SafeHtml {{ fn from(value: Html) -> Self {{ value.0 }} }}
-    impl ::std::convert::AsRef<str> for Html {{ fn as_ref(&self) -> &str {{ "" }} }}
-    pub mod __private {{ pub fn html_trusted(html: impl Into<String>) -> super::Html {{ super::Html(super::SafeHtml::trusted(html)) }} }}
-    pub mod advanced {{ pub use super::*; }}
-    pub struct FormContract {{ pub fields: &'static [FormField] }}
-    pub struct FormField {{ pub name: &'static str, pub kind: FormControlKind, pub required: bool }}
-    pub enum FormControlKind {{ Text, Number {{ min: Option<&'static str>, max: Option<&'static str>, step: Option<&'static str> }}, Checkbox, Radio, Select {{ multiple: bool }}, TextArea, File, Hidden, Submit, Other {{ tag: &'static str, input_type: Option<&'static str> }} }}
-}}
-mod hemplate {{
-    pub trait Hemplate {{ fn render_into(&self, out: &mut String) -> Result<(), ()>; }}
-}}
-{generated}
-fn main() {{
-    let html = todo::lower_html(r#"<main data-hemx-root><a href="/docs">Docs</a><form action="/todos" method="post" data-hemx-handle="create"><label for="title">Title</label><input id="title" name="title" aria-invalid="true" aria-describedby="title-error"><span id="title-error">Required</span><button data-hemx-on="click">Create</button></form><form action="/search" method="get"><input name="q"></form><li data-hemx-slot="row" h-key="7"></li></main>"#);
-    assert!(html.contains(r#"data-hemx-root"#));
-    assert!(html.contains(r#"data-hemx-action="#));
-    assert!(html.contains(r#"data-hemx-resource="#));
-    assert!(html.contains(r#"data-hemx-key="7""#));
-    assert!(html.contains(r#"data-hemx-on="click""#));
-    assert!(html.contains(r#"<a href="/docs">"#));
-    assert!(html.contains(r#"action="/todos" method="post""#));
-    assert!(html.contains(r#"action="/search" method="get""#));
-    assert!(html.contains(r#"aria-invalid="true""#));
-    assert!(html.contains(r#"aria-describedby="title-error""#));
-    assert!(html.contains(r#"id="title-error">Required"#));
-    assert!(html.contains(r#"name="__h""#));
-    // only the handled form carries the build; the GET search form does not.
-    let build = format!(r#"<input type="hidden" name="__b" value="{{}}">"#, BUILD_FINGERPRINT.0);
-    assert_eq!(BUILD_FINGERPRINT.0, 4242);
-    assert_eq!(html.matches(&build).count(), 1, "{{html}}");
-    assert_eq!(html.matches(r#"name="__b""#).count(), 1);
-    // A hand-written field is kept, not duplicated.
-    let own = todo::lower_html(r#"<form data-hemx-handle="create"><input type="hidden" name="__b" value="1"></form>"#);
-    assert_eq!(own.matches(r#"name="__b""#).count(), 1, "{{own}}");
-    assert!(!html.contains("data-hid"));
-    assert!(!html.contains("data-sid"));
-    assert!(!html.contains("h-key"));
-}}
-"###,
-        );
-        let source_path = base.join("lowering.rs");
-        let bin_path = base.join("lowering-bin");
-        std::fs::write(&source_path, source).unwrap();
-        let status = std::process::Command::new("rustc")
-            .arg(&source_path)
-            .arg("-o")
-            .arg(&bin_path)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let status = std::process::Command::new(&bin_path).status().unwrap();
-        assert!(status.success());
-
+        let build = |source: &str| {
+            std::fs::write(templates.join("save.heml"), source).unwrap();
+            app()
+                .check_format(false)
+                .template_dir(&templates)
+                .manifest_dir(&base)
+                .out_dir(base.join("out"))
+                .run()
+        };
+        let error = build(r#"<form id="save" method="post" data-hemx-handle="save"/>"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("save.heml"), "{error}");
+        assert!(error.contains("`<form ...></form>`"), "{error}");
+        build(r#"<form id="save" method="post" data-hemx-handle="save"></form>"#).unwrap();
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn format_check_names_all_files_and_the_fix_before_emitting_artifacts() {
+        let base = test_dir("hemx-build-format-all");
+        let templates = base.join("templates");
+        std::fs::create_dir_all(templates.join("nested")).unwrap();
+        let paths = [
+            templates.join("first.heml"),
+            templates.join("nested/second.heml"),
+        ];
+        let source = "<main><p>hello</p></main>";
+        for path in &paths {
+            std::fs::write(path, source).unwrap();
+        }
+        let surface = surface_for_heml_source(&paths[0], source.to_owned()).unwrap();
+        for supplied in [false, true] {
+            let out = base.join(if supplied { "supplied" } else { "scanned" });
+            let mut builder = app()
+                .template_dir(&templates)
+                .manifest_dir(&base)
+                .out_dir(&out);
+            if supplied {
+                builder = builder.surface(&paths[0], surface.clone());
+            }
+            let error = builder.run().unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            let message = error.to_string();
+            for path in &paths {
+                assert!(message.contains(&path.display().to_string()), "{message}");
+                assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+            }
+            assert!(message.contains("hemplate-fmt templates"), "{message}");
+            assert!(!out.exists());
+        }
+        for path in &paths {
+            std::fs::write(path, hemplate_fmt::format_heml(source, path).unwrap()).unwrap();
+        }
+        let out = base.join("canonical");
+        app()
+            .template_dir(&templates)
+            .manifest_dir(&base)
+            .out_dir(&out)
+            .run()
+            .unwrap();
+        assert!(out.join("hemx.generated.rs").is_file());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn format_check_requires_explicit_opt_out_even_without_out_dir() {
+        let base = test_dir("hemx-build-format-opt-out");
+        let templates = base.join("templates");
+        std::fs::create_dir_all(&templates).unwrap();
+        let path = templates.join("page.heml");
+        std::fs::write(&path, "<main><p>hello</p></main>").unwrap();
+        let builder = || {
+            app()
+                .template_dir(&templates)
+                .manifest_dir(&base)
+                .out_dir(base.join("out"))
+        };
+        assert!(builder().check_format(false).run().is_ok());
+        let error = builder()
+            .check_format(false)
+            .check_format(true)
+            .run()
+            .unwrap_err();
+        assert!(error.to_string().contains("hemplate-fmt templates"));
+
+        let _lock = OUT_DIR_LOCK.lock().unwrap();
+        let previous = std::env::var_os("OUT_DIR");
+        std::env::remove_var("OUT_DIR");
+        let result = app().template_dir(&templates).run();
+        match previous {
+            Some(value) => std::env::set_var("OUT_DIR", value),
+            None => std::env::remove_var("OUT_DIR"),
+        }
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains(&path.display().to_string()));
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     fn test_dir(prefix: &str) -> PathBuf {

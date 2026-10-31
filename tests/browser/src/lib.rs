@@ -49,17 +49,8 @@ pub struct Child {
 #[derive(Hemplate)]
 pub struct Grandchild;
 
-struct Markup<'a>(&'a str);
-
-impl Hemplate for Markup<'_> {
-    fn render_into(&self, out: &mut dyn std::fmt::Write) -> Result<(), hemplate::RenderError> {
-        out.write_str(self.0)?;
-        Ok(())
-    }
-}
-
 fn html(value: &str) -> SafeHtml {
-    hemx::page(&Markup(value)).into()
+    SafeHtml::trusted(value)
 }
 
 // Low-level protocol fixtures use fixed resource bindings. The keyed and
@@ -108,6 +99,35 @@ pub fn cases() -> Value {
     let mut wires = BTreeMap::new();
     let fingerprint = BuildFingerprint(0);
     wires.insert("empty", wire(vec![], fingerprint));
+    let keyed_target = ResourceRef {
+        scope: Some(ScopeKey::KeyValue("a".into())),
+        ..target(1)
+    };
+    for (name, content) in [
+        (
+            "explicit-row-full",
+            r#"
+<!-- row --><li data-hemx-resource="1" data-hemx-key="a" class="updated"><span>Full row</span></li>
+"#,
+        ),
+        (
+            "explicit-row-bare",
+            r#"<li data-hemx-key="a" class="bare"><span>Bare row</span></li>"#,
+        ),
+        ("explicit-row-content", "<span>Content only</span>"),
+    ] {
+        wires.insert(
+            name,
+            wire(
+                vec![Effect::Patch {
+                    target: keyed_target.clone(),
+                    mode: PatchMode::Morph,
+                    html: html(content),
+                }],
+                fingerprint,
+            ),
+        );
+    }
     for (name, ops) in [
         (
             "focus-control",
@@ -306,11 +326,11 @@ pub fn cases() -> Value {
         wires.insert(name, wire(vec![patch(mode, markup)], fingerprint));
     }
 
-    let initial = heml::page(&List {
+    let initial = heml::render(&List {
         todos: vec![row("old")],
     })
     .into_string();
-    let empty = heml::page(&List { todos: vec![] }).into_string();
+    let empty = heml::render(&List { todos: vec![] }).into_string();
     // Low-level Rows on the generated collection id, for rendered rows that a
     // `KeyedPartial` view cannot express (invalid shapes, conflicting keys).
     let raw_rows = |order: &[&str], key: &str, view: &dyn Fn() -> hemx::Html| {
@@ -343,13 +363,13 @@ pub fn cases() -> Value {
         (
             "conflicting-key",
             vec![raw_rows(&["old", "new"], "new", &|| {
-                heml::page(&ConflictingRow)
+                heml::render(&ConflictingRow)
             })],
         ),
         (
             "multiple-elements",
             vec![raw_rows(&["old", "new"], "new", &|| {
-                heml::page(&MultipleRows)
+                heml::render(&MultipleRows)
             })],
         ),
         (
@@ -460,8 +480,8 @@ pub fn cases() -> Value {
         "wireBoundary": wire_cases::cases(),
         "lifecycle": lifecycle_cases::cases(),
         "keyed": keyed,
-        "compositionInitial": heml::page(&Parent).into_string(),
-        "textInitial": heml::page(&Grandchild).into_string(),
+        "compositionInitial": heml::render(&Parent).into_string(),
+        "textInitial": heml::render(&Grandchild).into_string(),
         "generatedFingerprint": heml::BUILD_FINGERPRINT.0.to_string(),
     })
 }

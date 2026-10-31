@@ -60,7 +60,9 @@ async fn request(
         if let Some(Ok(bytes)) = body.next().await {
             map.lock().unwrap().get_mut(&id).unwrap().read_bytes += bytes.len();
         }
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        // Stall well past the case's 1000 ms deadline: the upload must still
+        // be incomplete when it expires, even on a slow or loaded machine.
+        tokio::time::sleep(Duration::from_millis(2500)).await;
         while let Some(chunk) = body.next().await {
             let Ok(bytes) = chunk else {
                 return StatusCode::BAD_REQUEST.into_response();
@@ -148,11 +150,18 @@ pub fn assert_timeouts(report: &Value, checked: &mut BTreeSet<String>) {
             observed["errors"][0]["code"], "HEMX_REQUEST_FAILED",
             "{name}"
         );
+        // The upload case gets more time so its request reliably reaches
+        // the server before the deadline, which then expires mid-upload.
+        let deadline = if name == "upload" {
+            "1000 ms"
+        } else {
+            "250 ms"
+        };
         assert!(
             observed["errors"][0]["message"]
                 .as_str()
                 .unwrap()
-                .contains("250 ms"),
+                .contains(deadline),
             "{name}"
         );
         assert_eq!(observed["state"]["requests"], 1, "{name}");

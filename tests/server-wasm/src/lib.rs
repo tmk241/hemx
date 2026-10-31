@@ -15,7 +15,7 @@ pub struct CounterView {
 }
 
 pub fn render_page(count: i32) -> hemx::Html {
-    ui::room::page(&Room { count })
+    ui::render(&Room { count })
 }
 
 pub fn update_counter(count: i32) -> Effect {

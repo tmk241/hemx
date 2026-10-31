@@ -48,6 +48,32 @@ pub(super) fn reject_unknown_hemx_attrs(path: &Path, attrs: &[SurfaceAttribute])
     Ok(())
 }
 
+/// Resource names are resolved while templates compile, so they must be literal.
+pub(super) fn reject_dynamic_resource_attrs(
+    path: &Path,
+    attrs: &[SurfaceAttribute],
+) -> io::Result<()> {
+    for attr in attrs
+        .iter()
+        .filter(|attr| attr.origin == AttributeOrigin::Dynamic)
+    {
+        let name = attr.name.as_str();
+        if matches!(
+            name,
+            "data-hemx-slot" | "data-hemx-collection" | "data-hemx-handle" | "data-hemx-form"
+        ) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{}: `+{name}` must be a static name; Hemx resolves generated resources when the template compiles, so write `{name}=\"name\"`",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn known_hemx_attr(name: &str) -> bool {
     matches!(
         name,
@@ -239,6 +265,24 @@ pub(super) fn reject_invalid_hemx_attr_placement(
             path,
             "data-hemx-sse",
             "expected placement on the same element as `data-hemx-root`",
+        ));
+    }
+    Ok(())
+}
+
+/// Hemx inserts a handled form's `__h` and `__b` fields as its first content,
+/// which a self-closing `<form .../>` does not have.
+pub(super) fn reject_self_closing_action_form(
+    path: &Path,
+    tag: &str,
+    attrs: &[SurfaceAttribute],
+    content_start: Option<usize>,
+) -> io::Result<()> {
+    if tag == "form" && has_attr(attrs, "data-hemx-handle") && content_start.is_none() {
+        return Err(invalid_hemx_placement(
+            path,
+            "data-hemx-handle",
+            "a self-closing `<form .../>` cannot hold the generated `__h` and `__b` fields; write `<form ...></form>`",
         ));
     }
     Ok(())

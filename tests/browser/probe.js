@@ -590,9 +590,12 @@
         let formdata = 0;
         d.addEventListener("invalid", () => invalid++, true);
         d.querySelector("form").addEventListener("formdata", event => { formdata++; event.formData.append("hook", "once"); });
+        // The native GET replaces the frame's document, and with it the new
+        // global's state; keep the records of the document that submitted.
+        const observed = w.observed;
         d.querySelector("button").click();
-        await waitFor(() => w.location.pathname !== "/frame" || w.observed.diagnostics.length > 0, "GET form result");
-        return { invalid, formdata, requests: w.observed.requests, location: w.location.href, diagnostics: w.observed.diagnostics };
+        await waitFor(() => w.location.pathname !== "/frame" || observed.diagnostics.length > 0, "GET form result");
+        return { invalid, formdata, requests: observed.requests, location: w.location.href, diagnostics: observed.diagnostics };
       });
 
     await observe("named-form-properties", root('<form action="/submit" method="post" data-hemx-action="7"><input name="action" value="action-value"><input name="method" value="method-value"><input name="enctype" value="enctype-value"><input name="target" value="target-value"><button>Save</button></form>'),
@@ -658,6 +661,27 @@
       };
     }, cases.generatedFingerprint);
 
+    await observe("explicit-row-patches", root('<ul><li data-hemx-resource="1" data-hemx-key="a"><span>Initial</span></li></ul>'), (w, d) => {
+      const row = d.querySelector("li");
+      const span = row.firstElementChild;
+      const patches = [];
+      // A wrapper without its resource marker, twice: the row must keep it.
+      for (const name of ["explicit-row-full", "explicit-row-full", "explicit-row-bare", "explicit-row-bare", "explicit-row-content"]) {
+        const accepted = apply(w, d, name);
+        patches.push({
+          accepted,
+          sameRow: d.querySelector("li") === row,
+          sameSpan: row.firstElementChild === span,
+          nested: row.querySelectorAll('[data-hemx-key="a"]').length,
+          rows: d.querySelectorAll('[data-hemx-resource="1"]').length,
+          text: row.textContent,
+          className: row.className,
+          diagnostics: w.observed.diagnostics.length,
+        });
+      }
+      return patches;
+    });
+
     for (const test of cases.keyed) {
       await observe(`keyed-${test.name}`, test.initial, (w, d) => {
         const first = d.querySelector("#rows > *");
@@ -676,6 +700,7 @@
     const helpers = { observe, fixture, root, apply, cases, waitFor, pause };
     await observeErrors(helpers);
     await observeTimeouts(helpers);
+    await observeLedger(helpers);
     await observeRuntimeCases(helpers);
     await observeFormAdmission(helpers);
     await observeWireCases(helpers);

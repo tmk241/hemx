@@ -1,6 +1,7 @@
 mod checks;
 mod errors;
 mod form_checks;
+mod ledger;
 mod lifecycle_checks;
 mod native_form_checks;
 mod native_forms;
@@ -111,6 +112,9 @@ async fn main() -> Result<(), Error> {
         .route("/timeouts-probe.js", get(|| async {
             ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../timeouts-probe.js"))
         }))
+        .route("/ledger-probe.js", get(|| async {
+            ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../ledger-probe.js"))
+        }))
         .route("/errors-probe.js", get(|| async {
             ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../errors-probe.js"))
         }))
@@ -132,6 +136,7 @@ async fn main() -> Result<(), Error> {
         .merge(native_forms::routes())
         .merge(errors::routes())
         .merge(timeouts::routes())
+        .merge(ledger::routes())
         .merge(streams.routes());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let origin = format!("http://{}", listener.local_addr()?);

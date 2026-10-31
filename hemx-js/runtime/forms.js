@@ -91,8 +91,10 @@ function createForms(dom, ownerOf, accepts, admit) {
       const action = new URL(record.options.action, location.href);
       if (destination.origin !== location.origin || destination.origin !== action.origin ||
           destination.pathname !== action.pathname || destination.hash !== action.hash) return;
-      const method = event.formData === null ? "GET" : "POST";
-      if (method !== record.options.method || (method === "POST" && destination.search !== action.search)) return;
+      // The form's own method decides. Chromium also exposes `formData` for a
+      // GET submission, so its presence cannot tell the methods apart.
+      const method = record.options.method;
+      if (method === "POST" && (event.formData === null || destination.search !== action.search)) return;
 
       // The browser has already serialized exactly once, including formdata
       // hooks and image coordinates. Copy entries, never serialize the DOM again.

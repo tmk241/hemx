@@ -1,7 +1,7 @@
 use hemx_core::{
     fold_batches, navigate, redirect, replace, BuildFingerprint, Effect, EffectBatch, EventName,
-    Form, HistoryMode, ParamName, PatchMode, ResourceId, ResourceKind, ResourceRef, SafeHtml,
-    ScopeKey, ScrollBehavior, ScrollBlock, Slot, WireError, EFFECT_BATCH_ABI_VERSION,
+    Form, HistoryMode, KeyedSlot, ParamName, PatchMode, ResourceId, ResourceKind, ResourceRef,
+    SafeHtml, ScopeKey, ScrollBehavior, ScrollBlock, Slot, WireError, EFFECT_BATCH_ABI_VERSION,
 };
 
 fn reference(id: u32, scope: Option<ScopeKey>) -> ResourceRef {
@@ -210,6 +210,32 @@ fn slot_text_escapes_markup_and_formats_once() {
         "&lt;b data-x=&quot;&amp;&quot;&gt;é&#39;&lt;/b&gt;"
     );
     assert_eq!(calls.get(), 1);
+}
+
+#[test]
+fn keyed_slot_text_escapes_markup_and_formats_once() {
+    struct Text<'a>(&'a std::cell::Cell<usize>);
+    impl core::fmt::Display for Text<'_> {
+        fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            self.0.set(self.0.get() + 1);
+            out.write_str("<b data-x=\"&\">é'</b>")
+        }
+    }
+    let calls = std::cell::Cell::new(0);
+    let effect = KeyedSlot::new(4).replace_text("row<&", Text(&calls));
+    let Effect::Patch { target, mode, html } = effect else {
+        panic!("text must produce a patch");
+    };
+    assert_eq!(
+        html.as_str(),
+        "&lt;b data-x=&quot;&amp;&quot;&gt;é&#39;&lt;/b&gt;"
+    );
+    assert_eq!(calls.get(), 1);
+    assert_eq!(
+        target,
+        reference(4, Some(ScopeKey::KeyValue("row<&".into())))
+    );
+    assert_eq!(mode, PatchMode::Morph);
 }
 
 #[test]

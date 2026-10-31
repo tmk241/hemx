@@ -28,6 +28,9 @@
   const boundRoots = new WeakSet();
   const dragKeys = new WeakMap();
   const activeRequests = new Set();
+  // Action URLs whose responses declared a submission ledger (x-hemx-ledger):
+  // only those may receive one automatic resend of a token.
+  const ledgerActions = new Set();
   const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
   const forms = createForms(dom, rootOf,
     (form, source) => handlesEvent(form, "submit") && Boolean(
@@ -300,9 +303,29 @@
 
   function httpError(response) {
     const error = new Error(`HTTP ${response.status}`);
-    error.code = "HEMX_REQUEST_FAILED";
+    // 425: the ledger still runs this submission's first request.
+    error.code = response.status === 425 ? "HEMX_SUBMISSION_PENDING" : "HEMX_REQUEST_FAILED";
     error.status = response.status;
     return error;
+  }
+
+  // One random token per enhanced POST attempt; its resend reuses it.
+  function submissionToken() {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  function ledgerKey(url) {
+    const parsed = new URL(url, location.href);
+    parsed.hash = "";
+    return parsed.href;
+  }
+
+  // Only a lost or late response is worth one resend; HTTP answers, effect
+  // failures and deliberate aborts are final outcomes.
+  function transientFailure(error) {
+    return !error.status && !error.hemxReported &&
+      (error.name === "TimeoutError" || error.name === "TypeError");
   }
 
   function showError(el, error, root = rootOf(el)) {
@@ -324,6 +347,7 @@
     const reportedCode = [
       "HEMX_REQUEST_FAILED", "HEMX_STALE_BUILD", "HEMX_BATCH_FAILED",
       "HEMX_ROWS_DRIFT", "HEMX_UNSUPPORTED_ABI", "HEMX_RUNTIME_FAILED",
+      "HEMX_SUBMISSION_PENDING",
     ].includes(error.code) ? error.code : code;
     emit(root, "hemx:error", { message, code: reportedCode, status: error.status || null });
   }
@@ -347,44 +371,67 @@
       const body = method === "GET" || method === "HEAD" ? undefined : requestBody(data, enctype === "multipart/form-data");
       const headers = { "X-HEMX-Partial": "1", "Accept": "application/hemx, text/html" };
       if (body instanceof URLSearchParams) headers["Content-Type"] = "application/x-www-form-urlencoded;charset=UTF-8";
+      const token = !mode && method === "POST" ? submissionToken() : null;
+      if (token) headers["X-Hemx-Token"] = token;
+      const url = requestUrl(action, data, method);
       if (active && policy === "latest") {
         active.abort.abort();
         active.release();
       }
 
+      // One network execution per pass: the first attempt and, after a lost
+      // or late response from a ledger-backed action, at most one resend with
+      // the same token. Each pass has its own deadline and pending state.
       const execute = async () => {
-        if (!dom.isConnected(el) || dom.ownerDocument(el) !== document || rootOf(el) !== owner) return;
-        const abort = new AbortController();
-        const timeout = setTimeout(
-          () => abort.abort(new DOMException(`hemx request timed out after ${timeoutMs} ms`, "TimeoutError")),
-          timeoutMs,
-        );
-        activeRequests.add(abort);
         let finish;
         const done = new Promise((resolve) => { finish = resolve; });
-        const release = beginPending(target, owner);
-        pending.set(target, { abort, done, release });
-        showError(target, null, owner);
         try {
-          if (mode) {
-            await navigateUrl(requestUrl(action, data, method), owner, mode, release, abort.signal);
-            return;
+          for (let resend = false; ; resend = true) {
+            if (!dom.isConnected(el) || dom.ownerDocument(el) !== document || rootOf(el) !== owner) return;
+            const abort = new AbortController();
+            const timeout = setTimeout(
+              () => abort.abort(new DOMException(`hemx request timed out after ${timeoutMs} ms`, "TimeoutError")),
+              timeoutMs,
+            );
+            activeRequests.add(abort);
+            const release = beginPending(target, owner);
+            pending.set(target, { abort, done, release });
+            if (!resend) showError(target, null, owner);
+            try {
+              if (mode) {
+                await navigateUrl(url, owner, mode, release, abort.signal);
+                return;
+              }
+              const response = await fetch(url, {
+                method, body, headers, credentials: "same-origin", signal: abort.signal,
+              });
+              if (token && response.headers.has("x-hemx-ledger")) ledgerActions.add(ledgerKey(url));
+              if ((pending.get(target)?.abort !== abort && policy === "latest") ||
+                  !dom.isConnected(owner) || dom.ownerDocument(owner) !== document || !dom.has(owner, ROOT)) {
+                discard(response);
+                return;
+              }
+              requireUsable(response, owner);
+              if (!await applyResponse(response, owner, release)) throw new Error("hemx response has no applicable content");
+              if (resend) showError(target, null, owner);
+              return;
+            } catch (rejection) {
+              // Why the request stopped is the reason Hemx gave its own signal
+              // (deadline, replacement, hidden page). WebKit rejects every
+              // aborted fetch with a generic AbortError instead of that reason.
+              const error = abort.signal.aborted ? abort.signal.reason : rejection;
+              if (resend || !token || !ledgerActions.has(ledgerKey(url)) || !transientFailure(error)) throw error;
+              // The failed attempt is reported and released like any other;
+              // only its token may be sent once more.
+              reportError(owner, error, "HEMX_REQUEST_FAILED");
+            } finally {
+              clearTimeout(timeout);
+              activeRequests.delete(abort);
+              if (pending.get(target)?.abort === abort) pending.delete(target);
+              release();
+            }
           }
-          const response = await fetch(requestUrl(action, data, method), {
-            method, body, headers, credentials: "same-origin", signal: abort.signal,
-          });
-          if ((pending.get(target)?.abort !== abort && policy === "latest") ||
-              !dom.isConnected(owner) || dom.ownerDocument(owner) !== document || !dom.has(owner, ROOT)) {
-            discard(response);
-            return;
-          }
-          requireUsable(response, owner);
-          if (!await applyResponse(response, owner, release)) throw new Error("hemx response has no applicable content");
         } finally {
-          clearTimeout(timeout);
-          activeRequests.delete(abort);
-          if (pending.get(target)?.abort === abort) pending.delete(target);
-          release();
           finish();
         }
       };
@@ -431,7 +478,9 @@
       if (mode === "push") history.pushState({ hemx: true }, "", href);
       else if (mode === "replace") history.replaceState({ hemx: true }, "", href);
       return true;
-    } catch (error) {
+    } catch (rejection) {
+      // Prefer the caller's own abort reason; WebKit rejects with AbortError.
+      const error = signal?.aborted ? signal.reason : rejection;
       if (error.name !== "AbortError" && !error.hemxReported) {
         reportError(root, error, "HEMX_REQUEST_FAILED");
       }
@@ -568,15 +617,18 @@
     return true;
   }
 
+  function singleElement(nodes) {
+    const elements = nodes.filter(dom.element);
+    if (elements.length !== 1 || nodes.some((node) => !dom.element(node) &&
+        dom.nodeType(node) !== 8 && (dom.nodeType(node) !== 3 || dom.textContent(node).trim() !== ""))) return null;
+    return elements[0];
+  }
+
   // A collection row is exactly one element of the current root, stamped with
   // its key. Insertion and replacement share this shape.
   function rowElement(nodes, ref, key, [action, adjective]) {
-    const elements = nodes.filter(dom.element);
-    if (elements.length !== 1 || nodes.some((node) => !dom.element(node) &&
-        dom.nodeType(node) !== 8 && (dom.nodeType(node) !== 3 || dom.textContent(node).trim() !== ""))) {
-      throw new Error(`hemx keyed ${action} requires one element`);
-    }
-    const row = elements[0];
+    const row = singleElement(nodes);
+    if (!row) throw new Error(`hemx keyed ${action} requires one element`);
     if (dom.has(row, ROOT) || dom.has(row, ISLAND)) throw new Error(`hemx ${adjective} row must belong to the current root`);
     const declared = dom.attr(row, KEY);
     if (declared !== null && declared !== key) throw new Error(`hemx ${adjective} key conflicts with rendered key`);
@@ -808,7 +860,7 @@
   }
 
   // A client that missed an update heals by fetching its page again, once
-  // If the next delta still finds another order before any delta
+  //. If the next delta still finds another order before any delta
   // applied, refetching will not help: report it instead of looping. Missing
   // capabilities (moveBefore) are not drift and never refetch.
   const DRIFT = "HEMX_ROWS_DRIFT";
@@ -846,11 +898,21 @@
         if (!parent) throw new Error("hemx replacement requires a parent");
         const nodes = morphing.parse(parent, op.html);
         dom.replaceWith(target, ...nodes);
-      } else if (op.target.scope?.kind === "key" && !attrEquals(target, RESOURCE, op.target.resource.id)) {
-        // A collection row is the keyed element itself: reconcile the rendered
-        // row with it, as a Rows declaration would create it, never nest it.
+      } else if (op.target.scope?.kind === "key") {
         const nodes = morphing.parse(dom.parentNode(target), op.html);
-        morphing.morphElement(target, rowElement(nodes, op.target, op.target.scope.value, ["replacement", "replacement"]));
+        const wrapper = singleElement(nodes);
+        // Collection targets always supply a row. Explicit row resources also
+        // reconcile a matching keyed wrapper, but still accept content-only HTML.
+        if (!attrEquals(target, RESOURCE, op.target.resource.id)) {
+          morphing.morphElement(target, rowElement(nodes, op.target, op.target.scope.value, ["replacement", "replacement"]));
+        } else if (wrapper && attrEquals(wrapper, KEY, op.target.scope.value)) {
+          if (dom.has(wrapper, ROOT) || dom.has(wrapper, ISLAND)) throw new Error("hemx replacement row must belong to the current root");
+          // The row keeps its own resource marker: a wrapper may omit it, but
+          // may not rename it, or later patches could no longer find the row.
+          if (!dom.has(wrapper, RESOURCE)) dom.setAttribute(wrapper, RESOURCE, dom.attr(target, RESOURCE));
+          else if (!attrEquals(wrapper, RESOURCE, op.target.resource.id)) throw new Error("hemx replacement row declares another resource");
+          morphing.morphElement(target, wrapper);
+        } else morphing.morph(target, op.html);
       } else morphing.morph(target, op.html);
     } else if (op.kind === "rows") {
       return applyRows(scope, op);

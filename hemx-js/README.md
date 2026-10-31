@@ -2,7 +2,7 @@
 
 Browser runtime assets embedded by Hemx integrations.
 
-## Native forms (development contract)
+## Native forms (Hemx 0.6.0)
 
 Eligible forms are enhanced only at a cancelable, same-origin native navigation.
 The runtime requires `NavigateEvent.sourceElement` and `NavigateEvent.formData`;
@@ -26,7 +26,6 @@ responses. See `hemx-axum` for transport integration. A failed enhanced POST is
 reported, never automatically replayed as a native submission.
 
 ## Request deadlines
-
 
 Enhanced action requests have a **ten-second default**. A form or standalone
 interaction trigger can set a longer or shorter client deadline:
@@ -55,7 +54,22 @@ The timer starts when the request executes, excluding queue wait, and remains
 active through upload and reading the complete response body. Expiry aborts
 client waiting, clears pending indicators/disabled controls and reports one
 `HEMX_REQUEST_FAILED` event through the normal localizable error path. Inputs
-remain intact and failed POSTs are never automatically replayed.
+remain intact. A failed POST is sent again automatically only as the one
+token resend described below.
+
+## One resend with a submission token
+
+Every enhanced POST carries a fresh random token in `X-Hemx-Token`. When an
+action's responses declare a server ledger (`x-hemx-ledger`, sent by
+`hemx_axum::action_with_ledger`), a submission whose response was lost or
+arrived after its deadline is reported once and then **sent once more with the
+same token**. The server returns the first result of that token instead of
+running the action again; if the first request still runs, the resend fails
+with `HEMX_SUBMISSION_PENDING`. A recovered result clears the error outlet and
+applies normally. HTTP errors, stale builds and effect failures are final and
+never resent. Without a declared ledger nothing is resent, exactly as before.
+The page learns the declaration from that action's earlier responses, so the
+first submission after loading cannot be resent.
 
 This is not a server execution deadline or a rollback guarantee. A proxy/server
 may impose a shorter limit; a server operation may still finish after the client
@@ -64,7 +78,7 @@ navigation or expose resumable progress belongs in application-owned jobs, with
 SSE or another existing read path for progress. This attribute does not change
 SSE connections or ordinary link navigation.
 
-## Error messages (development contract)
+## Error messages (Hemx 0.6.0)
 
 Hemx writes its default English message into the owning root's
 `[data-hemx-error]` outlets **before** emitting `hemx:error` on that root.
@@ -81,13 +95,17 @@ const messages = {
   HEMX_ROWS_DRIFT: "Die Anzeige ist nicht mehr aktuell. Bitte neu laden.",
   HEMX_UNSUPPORTED_ABI: "Diese Version wird nicht unterstützt. Bitte neu laden.",
   HEMX_RUNTIME_FAILED: "Die Anzeige konnte nicht verarbeitet werden.",
+  HEMX_SUBMISSION_PENDING: "Die Anfrage wird noch verarbeitet. Das Ergebnis steht noch nicht fest.",
 };
 root.addEventListener("hemx:error", event => {
   // A nested root's events bubble; do not translate another root's outlets.
   if (event.target !== root) return;
+  // Leave Hemx's default message intact for codes this application does not know.
+  if (!Object.hasOwn(messages, event.detail.code)) return;
+  const message = messages[event.detail.code];
   for (const outlet of root.querySelectorAll("[data-hemx-error]")) {
     if (window.hemx.rootOf(outlet) === root) {
-      outlet.textContent = messages[event.detail.code];
+      outlet.textContent = message;
     }
   }
 });
@@ -107,15 +125,18 @@ for application decisions. `HemxErrorCode` and `HemxErrorDetail` are exported in
 - `HEMX_UNSUPPORTED_ABI`: the batch uses an unsupported wire ABI version.
 - `HEMX_RUNTIME_FAILED`: another runtime operation, such as HTML reconciliation,
   failed.
+- `HEMX_SUBMISSION_PENDING`: a token resend arrived while the server still ran
+  that submission's first request (HTTP 425); its result is not yet known.
 
 These codes describe the client failure, **not whether a write committed**.
 A failed request can have an unknown server outcome; a failed batch can follow a
-successful server mutation. Do not automatically retry writes. Public
+successful server mutation. Do not add application retries of writes; only a
+ledger-backed action makes the runtime's single resend safe. Public
 `window.hemx.applyBatch` still returns `false` on failure, and an SSE batch failure
 still stops only that batch, not the next independently received one. Missing
 targets retain their separate `hemx:missing-target` diagnostic.
 
-## Live connections (development contract)
+## Live connections (Hemx 0.6.0)
 
 Hemx has one live channel: `data-hemx-sse` on a root, using the browser's
 `EventSource`, which reconnects by itself. Interactions go to the server as HTTP
@@ -170,7 +191,28 @@ batch with an SSE `id`, and `EventSource` returns the last one as
 `Last-Event-ID` when it reconnects. A page renders the cursor it shows into its
 `data-hemx-sse` URL (`?after=`) for the first connection.
 
-## Request fields and history (development contract)
+## Browser support
+
+The native browser suite passes in current Firefox, Chromium and WebKit
+(Playwright's build of the Safari 27.2 engine). Enhancement is decided by
+feature, not by browser name:
+
+- **Form enhancement** needs the Navigation API with
+  `NavigateEvent.sourceElement` and `formData`: Chromium, Firefox, and Safari
+  from 26.2. Without it every form submits natively, which is the baseline,
+  not an error.
+- **Request deadlines** work the same everywhere. WebKit rejects any aborted
+  `fetch` with a plain `AbortError`; Hemx reads its own abort reason, so an
+  expired deadline is still reported (and resent once with a ledger).
+- **Row movement** uses `moveBefore` where it exists. Safari does not have it
+  yet; see "Rows" for what is reinserted and what is refused there.
+- Chromium also exposes `formData` for GET submissions and fires `formdata`
+  twice per navigation. Hemx takes the method from the form and never
+  serializes a form itself, so both are handled.
+
+The suite tests the WebKit engine on Linux, not Safari on macOS or iOS.
+
+## Request fields and history (Hemx 0.6.0)
 
 A request carries the native successful form controls, the hidden `__h` and
 `__b` fields, and explicit `data-hemx-param-NAME` attributes on the handled
@@ -185,8 +227,8 @@ Each applied batch resolves generated targets with native attribute queries
 scoped to the owning root, so update cost stays small for large pages. Pages
 containing radio inputs additionally reconcile radio groups on each Morph.
 
-These changes are unreleased; do not assume the published 0.4.0 runtime already
-implements this contract.
+Hemx 0.6.0 implements this contract. Hemx 0.4.0 does not implement these
+request-field and history guarantees.
 
 ## License
 

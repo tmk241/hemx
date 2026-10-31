@@ -14,7 +14,7 @@ use hemx_axum::{
     PageResponse, HEMX_CONTENT_TYPE, HEMX_FINGERPRINT_HEADER, HEMX_PARTIAL_HEADER,
     HEMX_RUNTIME_CONTENT_TYPE, HEMX_TITLE_HEADER,
 };
-use hemx_core::{push, BuildFingerprint, Effect, Handle, IntoEffect, SafeHtml, Slot};
+use hemx_core::{push, BuildFingerprint, Effect, Handle, IntoEffect, Slot};
 use scraper::{Html, Selector};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tower::ServiceExt;
@@ -315,6 +315,10 @@ fn page_mode_detects_only_explicit_partial_header_values() {
     }
 }
 
+fn rendered(html: &str) -> hemx_core::Html {
+    hemx_core::Html::__rendered(html, BuildFingerprint(42))
+}
+
 #[test]
 fn page_request_wraps_full_pages_and_leaves_partials_unwrapped() {
     assert!(!PageRequest {
@@ -325,14 +329,17 @@ fn page_request_wraps_full_pages_and_leaves_partials_unwrapped() {
         mode: PageMode::Partial
     }
     .is_partial());
+    let shell = |content: hemx_core::Html| {
+        rendered(&format!(
+            "<html><body data-shell=\"docs\">{content}</body></html>"
+        ))
+    };
     let full = PageRequest {
         mode: PageMode::Full,
     }
-    .page("<main data-page=\"docs\">Docs</main>", |content| {
-        format!("<html><body data-shell=\"docs\">{content}</body></html>")
-    });
-    assert_eq!(full.mode, PageMode::Full);
-    let full_document = Html::parse_document(&full.html);
+    .page(rendered("<main data-page=\"docs\">Docs</main>"), shell);
+    assert_eq!(full.mode(), PageMode::Full);
+    let full_document = Html::parse_document(full.html().as_str());
     assert_eq!(
         full_document
             .select(&selector(
@@ -345,11 +352,9 @@ fn page_request_wraps_full_pages_and_leaves_partials_unwrapped() {
     let partial = PageRequest {
         mode: PageMode::Partial,
     }
-    .page("<main data-page=\"docs\">Docs</main>", |content| {
-        format!("<html><body data-shell=\"docs\">{content}</body></html>")
-    });
-    assert_eq!(partial.mode, PageMode::Partial);
-    let partial_fragment = Html::parse_fragment(&partial.html);
+    .page(rendered("<main data-page=\"docs\">Docs</main>"), shell);
+    assert_eq!(partial.mode(), PageMode::Partial);
+    let partial_fragment = Html::parse_fragment(partial.html().as_str());
     assert_eq!(
         partial_fragment
             .select(&selector("main[data-page=\"docs\"]"))
@@ -361,84 +366,12 @@ fn page_request_wraps_full_pages_and_leaves_partials_unwrapped() {
             .select(&selector("body[data-shell=\"docs\"]"))
             .count(),
         0
-    );
-}
-
-#[test]
-fn page_request_wraps_safe_html_full_pages_and_leaves_partials_unwrapped() {
-    let full = PageRequest {
-        mode: PageMode::Full,
-    }
-    .page_html(
-        SafeHtml::trusted("<main data-page=\"docs\">Docs</main>"),
-        |content| {
-            SafeHtml::trusted(format!(
-                "<html><body data-shell=\"docs\">{content}</body></html>"
-            ))
-        },
-    );
-    assert_eq!(full.mode, PageMode::Full);
-    let full_document = Html::parse_document(&full.html);
-    assert_eq!(
-        full_document
-            .select(&selector(
-                "body[data-shell=\"docs\"] main[data-page=\"docs\"]"
-            ))
-            .count(),
-        1
-    );
-
-    let partial = PageRequest {
-        mode: PageMode::Partial,
-    }
-    .page_html(
-        SafeHtml::trusted("<main data-page=\"docs\">Docs</main>"),
-        |content| {
-            SafeHtml::trusted(format!(
-                "<html><body data-shell=\"docs\">{content}</body></html>"
-            ))
-        },
-    );
-    assert_eq!(partial.mode, PageMode::Partial);
-    let partial_fragment = Html::parse_fragment(&partial.html);
-    assert_eq!(
-        partial_fragment
-            .select(&selector("main[data-page=\"docs\"]"))
-            .count(),
-        1
-    );
-    assert_eq!(
-        partial_fragment
-            .select(&selector("body[data-shell=\"docs\"]"))
-            .count(),
-        0
-    );
-}
-
-#[test]
-fn page_response_constructors_preserve_mode_and_optional_fingerprint() {
-    let full = PageResponse::full("<html>Full</html>");
-    assert_eq!(full.mode, PageMode::Full);
-    assert_eq!(full.html, "<html>Full</html>");
-    assert_eq!(full.fingerprint, None);
-
-    let partial = PageResponse::partial("<main>Partial</main>");
-    assert_eq!(partial.mode, PageMode::Partial);
-    assert_eq!(partial.html, "<main>Partial</main>");
-    assert_eq!(partial.title, None);
-    assert_eq!(partial.fingerprint, None);
-
-    let fingerprint = BuildFingerprint(42);
-    assert_eq!(
-        partial.fingerprint(fingerprint).fingerprint,
-        Some(fingerprint)
     );
 }
 
 #[tokio::test]
-async fn full_page_response_preserves_html_and_fingerprint_without_partial_headers() {
-    let response = PageResponse::full("<html>Full</html>")
-        .fingerprint(BuildFingerprint(42))
+async fn page_response_stamps_the_build_of_its_rendered_html() {
+    let response = PageResponse::full(rendered("<html><main data-hemx-root>Full</main></html>"))
         .into_response();
 
     assert_eq!(response.status(), StatusCode::OK);
@@ -446,18 +379,72 @@ async fn full_page_response_preserves_html_and_fingerprint_without_partial_heade
         response.headers()[header::CONTENT_TYPE],
         "text/html; charset=utf-8"
     );
+    // No application call supplies the build: it travels with the rendered Html.
     assert_eq!(response.headers()[HEMX_FINGERPRINT_HEADER], "42");
     assert!(!response.headers().contains_key(HEMX_PARTIAL_HEADER));
     assert!(!response.headers().contains_key(HEMX_TITLE_HEADER));
     assert_eq!(
         to_bytes(response.into_body(), 1024).await.unwrap().as_ref(),
-        b"<html>Full</html>"
+        b"<html><main data-hemx-root data-hemx-build=\"42\">Full</main></html>"
     );
+}
+
+#[tokio::test]
+async fn page_response_keeps_every_root_build_consistent_with_its_header() {
+    for partial in [false, true] {
+        let html = rendered(concat!(
+            "<main data-hemx-build='1' data-hemx-root title='unchanged'>",
+            "<section DATA-HEMX-ROOT DATA-HEMX-BUILD=2 data-hemx-build=3></section>",
+            "<aside data-hemx-root data-hemx-build></aside>",
+            "<p data-hemx-build='7'>Not a root</p></main>",
+        ));
+        let response = if partial {
+            PageResponse::partial(html)
+        } else {
+            PageResponse::full(html)
+        }
+        .into_response();
+        let build = response.headers()[HEMX_FINGERPRINT_HEADER]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body = to_bytes(response.into_body(), 2048).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        let document = Html::parse_fragment(body);
+        let roots: Vec<_> = document.select(&selector("[data-hemx-root]")).collect();
+        assert_eq!(roots.len(), 3);
+        for root in roots {
+            let root_build = root.value().attr("data-hemx-build");
+            assert_eq!(root_build, Some(build.as_str()));
+        }
+        assert_eq!(
+            body.to_ascii_lowercase().matches("data-hemx-build").count(),
+            4
+        );
+        assert_eq!(
+            document
+                .select(&selector("main"))
+                .next()
+                .unwrap()
+                .value()
+                .attr("title"),
+            Some("unchanged")
+        );
+        assert_eq!(
+            document
+                .select(&selector("p"))
+                .next()
+                .unwrap()
+                .value()
+                .attr("data-hemx-build"),
+            Some("7")
+        );
+    }
 }
 
 #[test]
 fn partial_page_response_sets_partial_and_title_headers() {
-    let response = PageResponse::partial("<main>Docs</main>")
+    let response = PageResponse::partial(rendered("<main>Docs</main>"))
         .title("Docs")
         .into_response();
 

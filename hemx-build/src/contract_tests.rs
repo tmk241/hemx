@@ -1,3 +1,5 @@
+// These contract fixtures test semantics independently of canonical layout.
+// Each builder explicitly disables formatting; lib.rs owns format enforcement tests.
 use super::*;
 use crate::artifact::{Resources, SlotRole};
 use std::process::{Command, Output};
@@ -8,6 +10,57 @@ fn inspect(source: &str) -> io::Result<Resources> {
     let mut resources = Resources::default();
     resources.add_surface(Path::new("templates"), path, &surface)?;
     Ok(resources)
+}
+
+#[test]
+fn templates_outside_derive_root_fail_before_emitting_artifacts() {
+    let base = std::env::temp_dir().join(format!("hemx-build-custom-root-{}", std::process::id()));
+    let templates = base.join("views");
+    std::fs::create_dir_all(&templates).unwrap();
+    let path = templates.join("panel.heml");
+    let source = r#"<section data-hemx-slot="panel"></section>"#;
+    std::fs::write(&path, source).unwrap();
+    let surface = surface_for_heml_source(&path, source.to_owned()).unwrap();
+    for supplied in [false, true] {
+        let out = base.join(if supplied { "supplied" } else { "scanned" });
+        let mut builder = app()
+            .check_format(false)
+            .template_dir(&templates)
+            .manifest_dir(&base)
+            .out_dir(&out);
+        if supplied {
+            builder = builder.surface(&path, surface.clone());
+        }
+        let error = builder.run().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let message = error.to_string();
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(
+            message.contains("Hemplate") && message.contains("templates/"),
+            "{message}"
+        );
+        assert!(message.contains("move"), "{message}");
+        assert!(!out.join("hemx.generated.rs").exists());
+    }
+    // Selecting a subdirectory is supported: derive still finds its transform
+    // relative to templates/, not relative to template_dir.
+    let nested = base.join("templates/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("panel.heml"), source).unwrap();
+    let out = base.join("nested-out");
+    app()
+        .check_format(false)
+        .template_dir(&nested)
+        .manifest_dir(&base)
+        .out_dir(&out)
+        .run()
+        .unwrap();
+    assert!(hemplate_core::transform::path_for(
+        &out.join("hemplate-transform"),
+        Path::new("nested/panel.heml")
+    )
+    .is_file());
+    std::fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
@@ -52,7 +105,9 @@ fn timeout_static_values_fail_build_with_source_diagnostics() {
         )
         .unwrap();
         let error = app()
+            .check_format(false)
             .template_dir(&templates)
+            .manifest_dir(&base)
             .out_dir(&out)
             .run()
             .unwrap_err();
@@ -229,6 +284,19 @@ fn resource_marker_conflicts_report_the_source_and_both_declarations() {
         }
     }
 
+    // Names resolved at compile time cannot come from runtime values.
+    for name in ["slot", "collection", "handle", "form"] {
+        let error = inspect(&format!(r#"<div +data-hemx-{name}="self.name"></div>"#))
+            .err()
+            .expect("dynamic resource name must fail");
+        assert!(
+            error.to_string().starts_with(&format!(
+                "templates/roles.heml: `+data-hemx-{name}` must be a static name"
+            )),
+            "{error}"
+        );
+    }
+
     // A slot's host tag alone does not establish a conflicting declaration.
     for source in [
         r#"<input data-hemx-slot="value">"#,
@@ -259,29 +327,30 @@ fn generated_composition_and_collection_capabilities_execute_against_real_crates
     for (name, source) in [
         (
             "parent",
-            r#"<main data-hemx-root><section data-hemx-slot="outlet"></section><ul data-hemx-collection="rows"></ul><template h-for="row in &self.rows" h-key="row.id"><li data-hemx-slot="repeated"></li></template></main>"#,
+            r#"<main data-hemx-root><section data-hemx-slot="outlet">{+ Child +}</section><ul data-hemx-collection="rows"></ul><template h-for="row in &self.rows" h-key="row"><li data-hemx-slot="repeated"></li></template></main>"#,
         ),
         (
             "child",
-            r#"<article><span data-hemx-slot="child_text"></span></article>"#,
+            r#"<article><span data-hemx-slot="child_text">child</span>{+ Grandchild +}</article>"#,
         ),
         (
             "grandchild",
-            r#"<section data-hemx-slot="grandchild_text"><form data-hemx-form="editor" data-hemx-handle="save" data-hemx-timeout="120s"><button>Save</button></form></section>"#,
+            r#"<section data-hemx-slot='grandchild_text'><form data-hemx-form='editor' data-hemx-handle='save' data-hemx-timeout='120s'><button>Save</button></form></section>"#,
         ),
+        ("trusted", r#"<p>{+ self.text +}{+= self.raw =+}</p>"#),
     ] {
         std::fs::write(templates.join(format!("{name}.heml")), source).unwrap();
     }
     app()
+        .check_format(false)
         .template_dir(&templates)
+        .manifest_dir(&base)
         .out_dir(&out)
-        .global_exports(true)
         .run()
         .unwrap();
     let generated = std::fs::read_to_string(out.join("hemx.generated.rs")).unwrap();
-    assert_eq!(generated.matches("const __HEMX_LOWERING_TABLE:").count(), 1);
     assert!(!generated.contains("pub struct Component;"));
-    assert!(!generated.contains("__HEMX_LOWERING_TABLE_CHILD"));
+    assert!(!generated.contains("__HEMX_LOWERING_TABLE"));
 
     // Build the actual facade and renderer with the workspace lock; no fixture lockfile,
     // installed dependency, guessed rlib hash, or fake effect model is needed.
@@ -305,6 +374,8 @@ fn generated_composition_and_collection_capabilities_execute_against_real_crates
                 "hemx",
                 "-p",
                 "hemplate",
+                "--features",
+                "hemplate/derive",
                 "--target-dir",
             ])
             .arg(&target)
@@ -315,6 +386,11 @@ fn generated_composition_and_collection_capabilities_execute_against_real_crates
     let debug = target.join("debug");
     let compile = |path: &Path, bin: &Path| {
         Command::new("rustc")
+            .env("CARGO_MANIFEST_DIR", &base)
+            .env(
+                hemplate_core::transform::DIR_ENV,
+                out.join("hemplate-transform"),
+            )
             .args([
                 "--edition=2021",
                 "--crate-name",
@@ -338,35 +414,16 @@ fn generated_composition_and_collection_capabilities_execute_against_real_crates
     let common = format!(
         r###"
 #![allow(dead_code)]
-mod ui {{ {generated} }}
+mod ui {{ mod __hemx_surface {{ pub const INCLUDE_THROUGH_HEMX_SURFACE: () = (); }} {generated} }}
 use hemplate::Hemplate;
 use hemx::GeneratedTarget;
 use hemx::advanced::{{Effect, PatchMode, ResourceRef, ScopeKey}};
-struct Parent;
-struct Child;
-struct Grandchild;
-impl Hemplate for Parent {{
-    fn render_into(&self, out: &mut dyn std::fmt::Write) -> Result<(), hemplate::RenderError> {{
-        out.write_str("<main data-hemx-root><section data-hemx-slot=\"outlet\">")?;
-        Child.render_into(out)?;
-        out.write_str("</section><ul data-hemx-collection=\"rows\"></ul></main>")?;
-        Ok(())
-    }}
-}}
-impl Hemplate for Child {{
-    fn render_into(&self, out: &mut dyn std::fmt::Write) -> Result<(), hemplate::RenderError> {{
-        out.write_str("<article><span data-hemx-slot=\"child_text\">child</span>")?;
-        Grandchild.render_into(out)?;
-        out.write_str("</article>")?;
-        Ok(())
-    }}
-}}
-impl Hemplate for Grandchild {{
-    fn render_into(&self, out: &mut dyn std::fmt::Write) -> Result<(), hemplate::RenderError> {{
-        out.write_str("<section data-hemx-slot='grandchild_text'><form data-hemx-form='editor' data-hemx-handle='save' data-hemx-timeout='120s'><button>Save</button></form></section>")?;
-        Ok(())
-    }}
-}}
+// Real derived templates: only the transform written by the build step lowers them.
+#[derive(Hemplate)] struct Parent {{ rows: Vec<String> }}
+#[derive(Hemplate)] struct Child;
+#[derive(Hemplate)] struct Grandchild;
+#[derive(Hemplate)] struct Trusted {{ text: String, raw: ::hemx::advanced::SafeHtml }}
+fn parent() -> Parent {{ Parent {{ rows: Vec::new() }} }}
 impl hemx::KeyedPartial for Child {{ fn hemx_key(&self) -> String {{ "new-row".into() }} }}
 fn assert_lowered(html: &str) {{
     assert!(html.contains(&format!("data-hemx-resource=\"{{}}\"", ui::child::child_text.__hemx_resource_id().id)));
@@ -387,13 +444,18 @@ fn assert_lowered(html: &str) {{
     let source = format!(
         r###"{common}
 fn main() {{
-    let page = ui::parent::page(&Parent);
+    let page = ui::render(&parent());
     assert_lowered(page.as_str());
     assert!(page.as_str().contains(&format!("data-hemx-resource=\"{{}}\" data-hemx-collection=\"\"", ui::parent::rows.__hemx_resource_id().id)));
-    assert_eq!(ui::parent::lower(page.as_str()), page.as_str());
-    let single = ui::parent::lower("<ul data-hemx-collection='rows'></ul>");
-    assert!(single.contains("data-hemx-collection=''"));
-    assert!(!single.contains("data-hemx-collection='rows'"));
+    // Plain Hemplate rendering already yields the final markup and action fields.
+    let plain = parent().render().unwrap();
+    assert_eq!(plain, page.as_str());
+    assert!(plain.contains(&format!("<input type=\"hidden\" name=\"__h\" value=\"{{}}\"><input type=\"hidden\" name=\"__b\" value=\"{{}}\">", ui::grandchild::save.id().id, ui::BUILD_FINGERPRINT.0)));
+    // Interpolated text and trusted raw HTML are never rewritten.
+    let marker = "<i data-hemx-slot=\"outlet\" data-hemx-handle=\"save\" h-key=\"k\"></i>";
+    let trusted = Trusted {{ text: marker.into(), raw: ::hemx::advanced::SafeHtml::trusted(marker) }}.render().unwrap();
+    assert!(trusted.ends_with(&format!("{{marker}}</p>")));
+    assert!(trusted.contains("&lt;i data-hemx-slot=&quot;outlet&quot;"));
     let Effect::Patch {{ target, mode: PatchMode::Morph, html }} = ui::parent::outlet.put(&Child) else {{ panic!("slot must patch") }};
     assert_eq!(target, ResourceRef::unscoped(ui::parent::outlet.__hemx_resource_id()));
     assert_lowered(html.as_str());
@@ -424,8 +486,8 @@ fn main() {{
     let wire = batch.to_wire().unwrap();
     assert_eq!(hemx::advanced::EffectBatch::from_wire(&wire).unwrap(), batch);
     assert_eq!(batch.to_wire().unwrap(), wire);
-    assert_lowered(ui::page(&Parent).as_str());
-    assert_lowered(ui::child::page(&Child).as_str());
+    assert_lowered(ui::render(&parent()).as_str());
+    assert_lowered(ui::render(&Child).as_str());
 }}
 "###
     );

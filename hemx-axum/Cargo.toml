@@ -1,6 +1,6 @@
 [package]
 name = "hemx-axum"
-version = "0.5.1"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -16,13 +16,13 @@ path = "src/lib.rs"
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["multipart", "tokio"] }
 futures-util = { version = "0.3", default-features = false }
-hemx-core = { version = "0.5.0", path = "../hemx-core" }
-hemplate-runtime = { version = "0.3.0", default-features = false }
-hemx-js = { version = "0.5.1", path = "../hemx-js" }
-tokio = { version = "1", default-features = false, features = ["sync"] }
+hemx-core = { version = "0.6.0", path = "../hemx-core" }
+hemplate-runtime = { version = "0.4.0", default-features = false }
+hemx-js = { version = "0.6.0", path = "../hemx-js" }
+tokio = { version = "1", default-features = false, features = ["rt", "sync"] }
 
 [dev-dependencies]
-hemplate = { version = "0.4.0", default-features = false, features = ["derive"] }
+hemplate = { version = "0.5.0", default-features = false, features = ["derive"] }
 scraper = "0.25"
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
 tower = { version = "0.5", features = ["util"] }

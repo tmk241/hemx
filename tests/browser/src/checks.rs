@@ -58,6 +58,9 @@ pub fn assert_report(report: &Value, origin: &str) {
     check_group("request deadlines", &mut failures, || {
         crate::timeouts::assert_timeouts(report, &mut checked);
     });
+    check_group("submission ledger", &mut failures, || {
+        crate::ledger::assert_ledger(report, &mut checked);
+    });
     check_group("runtime entrypoint", &mut failures, || {
         let observed = case(report, &mut checked, "runtime-entrypoint");
         assert_eq!(observed["abi"], hemx_js::RUNTIME_ABI_VERSION);
@@ -321,7 +324,9 @@ pub fn assert_report(report: &Value, origin: &str) {
             }
             assert_eq!(observed["value"], "unsent edit");
             assert_eq!(observed["selection"], json!([2, 5, "backward"]));
-            if mode == "unavailable" {
+            // "native" uses whatever the browser offers: Safari has no
+            // `moveBefore` yet, so there the native case must also refuse.
+            if mode == "unavailable" || observed["capability"] == "undefined" {
                 assert_eq!(observed["capability"], "undefined");
                 assert_eq!(observed["moved"], false);
                 assert_eq!(observed["mutations"], 0);
@@ -511,7 +516,9 @@ pub fn assert_report(report: &Value, origin: &str) {
             observed["invalid"], 0,
             "formnovalidate must use the native submit lifecycle"
         );
-        assert_eq!(observed["formdata"], 1);
+        // At least the native serialization; Chromium may fire `formdata`
+        // again for the navigation. The request below must carry `hook` once.
+        assert!(observed["formdata"].as_u64().unwrap() >= 1);
         assert_eq!(observed["diagnostics"], json!([]));
         assert_get(
             single_request(&observed["requests"]),
@@ -670,6 +677,26 @@ pub fn assert_report(report: &Value, origin: &str) {
                 "{name}"
             );
             assert_eq!(observed["requests"], usize::from(healing), "{name}");
+        }
+        let patches = case(report, &mut checked, "explicit-row-patches");
+        let patches = patches.as_array().unwrap();
+        assert_eq!(patches.len(), 5);
+        let expected = [
+            ("Full row", "updated"),
+            ("Full row", "updated"),
+            ("Bare row", "bare"),
+            ("Bare row", "bare"),
+            ("Content only", "bare"),
+        ];
+        for (patch, (text, class)) in patches.iter().zip(expected) {
+            assert_eq!(patch["accepted"], true);
+            assert_eq!(patch["nested"], 0);
+            assert_eq!(patch["rows"], 1);
+            assert_eq!(patch["text"], text);
+            assert_eq!(patch["sameRow"], true);
+            assert_eq!(patch["sameSpan"], true);
+            assert_eq!(patch["className"], class);
+            assert_eq!(patch["diagnostics"], 0);
         }
         // The row is the keyed element itself: same node, new content, no nesting.
         let observed = &report["keyed-replace"];

@@ -31,7 +31,6 @@ async fn add_todo(app: App, form: hemx::Form<NewTodo>) -> impl hemx::IntoEffect 
 <ul data-hemx-collection="rows"></ul>
 ```
 
-
 This excerpt uses a `todos.heml` template, application state `App`, and an
 application-defined `TodoRow` implementing `Hemplate` and `hemx::KeyedPartial`.
 Effects declare state rather than issue commands. A collection either receives
@@ -42,15 +41,32 @@ rows are in the `before` order. A delta already at its resulting order is
 skipped. Merging preserves every intermediate operation in order: an intervening
 update can affect unsent form values even when the final defaults look the same.
 Never discard an unsent declaration in favor of a newer one. Keyed row targets
-replace one existing row; ordinary slots remain HTML/text update hosts. Generated
-rendering helpers lower the complete resource table, including nested components.
+replace one existing row; ordinary slots remain HTML/text update hosts. Templates
+are lowered when they compile, so every render already carries the final
+markers of nested components.
 
 Wire ABI and runtime ABI are version 3; the surface schema is version 2.
 Encoding is fallible: `batch.to_wire()?` rejects incompatible or oversized
 batches before emitting bytes. Earlier wire ABIs are rejected, not translated.
 
-## Run a complete example
+## Build-time formatting
 
+`hemx_build::app().run()` requires canonical Hemplate layout by default. A build
+error names every noncanonical template and the fix: `hemplate-fmt templates`.
+Use `hemplate-fmt --check templates` to check without rewriting. Formatting
+preserves rendered output, attribute order, expressions, and raw/preformatted
+content.
+
+An application may explicitly opt out in `build.rs`:
+
+```rust,ignore
+hemx_build::app().check_format(false).run()?;
+```
+
+Custom template directories and precomputed surfaces do not disable the check.
+See [hemx-build](hemx-build/README.md) for the build contract.
+
+## Run a complete example
 
 The [Axum + Hemplate counter](examples/counter/README.md) has a page with a nested component,
 generated typed form/resource/handle APIs, the actual browser runtime, and one
@@ -66,21 +82,79 @@ Run from this repository with its Hemplate checkout. The example binds loopback
 only and uses shared process-local state, not production authentication or
 storage. Disable JavaScript to try the native fallback.
 
-Use the **generated** `heml::page::render(&view)` (where `page` is the template
-module), then `hemx_axum::PageResponse::full(..).fingerprint(heml::BUILD_FINGERPRINT)`.
-Generated rendering lowers the complete resource/handle table and adds native
-form hidden fields; the Axum response stamps the root build marker. Raw
-`Hemplate::render` alone does not lower those authoring names and is not the
-normal Hemx rendering path. Inside the template, compose children with
-`{+ Child::new(...) +}`: Hemplate renders a component directly into the parent's
-buffer, while ordinary text values are escaped. The outer generated renderer
-lowers the complete nested resource table; do not wrap each child in
-`{+= heml::render(&child) =+}`. Raw `{+= ... =+}` is for already-produced,
-explicitly trusted HTML, not component composition. `heml` is the generated Rust
-module, not another template operator.
+There is one render path. `hemx-build` hands Hemplate the generated resource IDs
+while templates compile, so rendering a view already produces the final
+`data-hemx-resource` / `data-hemx-action` markers and the hidden `__h` / `__b`
+fields of handled forms. Nothing rewrites HTML after rendering: interpolated
+text and trusted raw HTML reach the page unchanged. Resource names must be
+literal (`data-hemx-slot="count"`, never `+data-hemx-slot`).
 
-The example also shows the async Axum wrapper for `runtime_js()` and typed
-`RuntimeScript` template interpolation.
+Render any view with the generated `heml::render(&view)` and pass its `Html`
+to `hemx_axum::PageResponse::full(..)`. No template name is needed: every
+template was lowered when it compiled. That `Html`
+knows the build that rendered it; the response stamps it on each root and in
+its header. `PageResponse` does not accept plain strings. Inside the template,
+compose children with `{+ Child::new(...) +}`: Hemplate renders a component
+directly into the parent's buffer, while ordinary text values are escaped.
+Raw `{+= ... =+}` is for already-produced, explicitly trusted HTML, not
+component composition; it accepts Hemx's `SafeHtml` and rendered `Html` (or
+Hemplate's `TrustedHtml`), never a plain string. `heml` is the generated Rust module, not another
+template operator.
+
+`hemx_axum::action` answers both representations of a form action from one
+handler: effects for the runtime, a 303 to a declared same-origin page or a
+422 feedback page for a plain form. `hemx_axum::runtime_route()` serves the
+browser runtime; the template includes it through the typed `RuntimeScript`.
+
+## Migrating from 0.5 to 0.6
+
+Use Hemplate 0.5 (hemplate-core and hemplate-runtime 0.4). Rebuild templates,
+server and runtime together. Two applications migrated with mechanical edits
+of about 20 files each and kept all their tests passing; the steps below are
+the ones they needed, roughly in the order the compiler asks for them.
+
+1. **Build script.** Remove `.global_exports(true)`; `hemx_build::app().run()`
+   is the whole build step.
+2. **One generated module.** Replace a root
+   `include!(concat!(env!("OUT_DIR"), "/hemx.generated.rs"))` with
+   `#[hemx::surface] pub mod heml {}`. Generated names move under it:
+   `crate::item_list::targets::x` becomes `crate::heml::item_list::targets::x`,
+   `BUILD_FINGERPRINT` becomes `heml::BUILD_FINGERPRINT`. The old root
+   `targets` module is gone; name the template, as in
+   `heml::article_page::targets::status`.
+3. **Render.** Templates are lowered when they compile, so every view renders
+   through one function: `heml::render(&view) -> Html`. It replaces
+   `heml::page(..)`, `heml::<template>::render(..)`, `view.render()?` followed
+   by `lower(..)`, and `hemx::page`/`render_html`. Rendering no longer returns
+   a `Result`: prepare fallible values (for example `Url::parse`) before
+   building the view.
+4. **Responses.** `PageResponse::full(heml::render(&page))` takes the typed
+   `Html` and stamps its build itself; drop `.fingerprint(..)` and any
+   `String` argument; `PageRequest::page` likewise takes and returns `Html`. A
+   helper such as `fn page_response(html: Html)` keeps one place for shared
+   headers.
+5. **Fragments.** `Html` is a finished render of this build. Markup you store
+   and compose before rendering (the old `Html::join`) is `SafeHtml`:
+   `SafeHtml::join(..)`, and `heml::render(&view).into()` to keep a rendered
+   view as a fragment. Prefer composing child views with `{+ child +}` where
+   the structure allows it.
+6. **Raw output.** `{+= x =+}` takes `SafeHtml`, `Html` or Hemplate's
+   `TrustedHtml`, never a string: `{+= self.x.as_str() =+}` becomes
+   `{+= self.x =+}`. A sanitizer's output type implements
+   `hemplate::HtmlValue` (`impl hemplate::HtmlValue for ArticleContent {}`)
+   to be inserted raw.
+7. **Templates.** Resource names (`data-hemx-slot`, `-collection`, `-handle`,
+   `-form`) must be literal attributes; a handled form needs
+   `<form ...></form>`, not `<form .../>`. Markers inside interpolated text or
+   raw HTML are no longer rewritten.
+8. **Forms.** A `#[hemx::form]` field without a control in the declaring
+   template now fails with a diagnostic naming the form, field and template.
+
+New in 0.6: `hemx_axum::action` with `Native` answers native and enhanced
+submissions from one route; `runtime_route()` serves the runtime;
+`action_with_ledger` with `MemoryLedger` makes the runtime's single token
+resend safe, and the browser reports `HEMX_SUBMISSION_PENDING` for a resend
+that finds its first request still running.
 
 ## Migrating from 0.4 to 0.5
 
@@ -92,7 +166,8 @@ older runtime crates do not define the context traits used by `RuntimeScript`.
   server and browser assets together; ABI 2 is rejected rather than translated.
 - Generated action forms carry `__b`. Handler dispatch rejects stale builds
   with 409 and cross-site requests with 403 before handlers run. Manual dispatch
-  must use `require_build`; an enhanced failed POST is never replayed.
+  must use `require_build`; an enhanced failed POST is resent only once with its
+  token, and only to an `action_with_ledger` route that deduplicates it.
 - Use `hemx_axum::RuntimeScript` for an interpolated Hemplate `<script src>`.
   Hemplate now requires checked or explicitly trusted context-specific values
   where ordinary text escaping cannot prevent execution.

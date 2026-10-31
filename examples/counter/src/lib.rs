@@ -3,13 +3,12 @@
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{header, HeaderMap};
-use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::Router;
 use hemplate::Hemplate;
 use hemx_axum::{
-    interactions, DispatchRejection, Form, InteractionRequest, PageResponse, RuntimeScript,
+    interactions, Form, InteractionForm, LedgerLimits, MemoryLedger, Native, PageResponse,
+    RuntimeScript,
 };
 
 #[hemx::surface]
@@ -21,6 +20,21 @@ type Counter = Arc<Mutex<u64>>;
 struct Page {
     count: u64,
     runtime: RuntimeScript,
+    /// The amount shown in the form: the default, or a rejected submission.
+    amount: String,
+    /// Why a native submission was rejected, announced beside its field.
+    problem: Option<String>,
+}
+
+impl Page {
+    fn new(count: u64) -> Self {
+        Self {
+            count,
+            runtime: RuntimeScript,
+            amount: "1".into(),
+            problem: None,
+        }
+    }
 }
 
 // A presentational child is an ordinary Hemplate view, not a handler component.
@@ -53,56 +67,50 @@ fn increment(counter: Counter, form: Form<Increment>) -> impl hemx::IntoEffect {
 
 /// Construct a fresh demonstration application. All its clients share one count.
 pub fn app() -> Router {
+    let counter = Counter::default();
+    // The adapter answers both representations of one action: the runtime's
+    // enhanced request receives effects, a plain form a 303 back to the page,
+    // or the page again with the rejected amount and its problem. The same
+    // extraction guards and handler run either way.
+    let feedback = {
+        let counter = counter.clone();
+        move |input: &InteractionForm, problem: &str| {
+            let mut page = Page::new(*counter.lock().expect("counter lock poisoned"));
+            page.amount = input.value("amount").unwrap_or_default().to_owned();
+            page.problem = Some(format!("Enter a whole number from 0 to 255 ({problem})."));
+            heml::render(&page)
+        }
+    };
     Router::new()
         .route("/", get(index))
-        .route("/increment", post(submit))
-        // Axum requires an async handler, not the synchronous runtime_js function.
         .route(
-            hemx_axum::runtime_js_route_path(),
-            get(|| async { hemx_axum::runtime_js() }),
+            "/increment",
+            hemx_axum::action_with_ledger(
+                interactions(heml::BUILD_FINGERPRINT).on_state_form(
+                    heml::page::increment,
+                    counter.clone(),
+                    increment,
+                ),
+                Native::new("/", feedback),
+                // Remembers recent enhanced submissions, so the runtime's one
+                // resend after a lost response never adds the amount twice.
+                // One process only: several would share a ledger in storage.
+                MemoryLedger::new(LedgerLimits {
+                    entries: 1024,
+                    bytes: 1 << 20,
+                    age: std::time::Duration::from_secs(600),
+                }),
+            ),
         )
+        .merge(hemx_axum::runtime_route())
         .layer(DefaultBodyLimit::max(1024))
-        .with_state(Counter::default())
+        .with_state(counter)
 }
 
 async fn index(State(counter): State<Counter>) -> PageResponse {
     let count = *counter.lock().expect("counter lock poisoned");
-    // Generated rendering lowers resource/action names and adds hidden __h / __b.
-    // The Axum page response stamps each root with that same build fingerprint.
-    PageResponse::full(
-        heml::page::render(&Page {
-            count,
-            runtime: RuntimeScript,
-        })
-        .into_string(),
-    )
-    .fingerprint(heml::BUILD_FINGERPRINT)
-}
-
-async fn submit(
-    State(counter): State<Counter>,
-    headers: HeaderMap,
-    request: InteractionRequest,
-) -> Result<Response, DispatchRejection> {
-    let enhanced = headers
-        .get(header::ACCEPT)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(',')
-                .any(|part| part.trim() == "application/hemx")
-        });
-
-    // The extractor rejects cross-site requests; registry dispatch rejects stale
-    // builds before calling increment. Native submissions pass the same checks.
-    let effects = request.dispatch(interactions(heml::BUILD_FINGERPRINT).on_state_form(
-        heml::page::increment,
-        counter,
-        increment,
-    ))?;
-    Ok(if enhanced {
-        effects.into_response()
-    } else {
-        Redirect::to("/").into_response()
-    })
+    // Templates are lowered when they compile: rendering already yields final
+    // resource markers and the hidden __h / __b fields. The rendered Html knows
+    // its build, which the page response stamps on each root.
+    PageResponse::full(heml::render(&Page::new(count)))
 }

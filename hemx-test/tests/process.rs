@@ -28,6 +28,16 @@ fn wait_until_closed(address: &str) {
     );
 }
 
+/// Output is captured by a reader thread; readiness (an open port) can be
+/// observed before the line the helper prints next has been read.
+fn captured_stdout_eventually(process: &TestProcess, expected: &str) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !process.stdout().contains(expected) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    process.stdout().contains(expected)
+}
+
 #[test]
 fn builder_waits_for_delayed_tcp_readiness_and_captures_output() {
     let address = unused_loopback_addr();
@@ -43,7 +53,7 @@ fn builder_waits_for_delayed_tcp_readiness_and_captures_output() {
 
     assert!(process.id().is_some());
     assert!(TcpStream::connect(&address).is_ok());
-    assert!(process.stdout().contains("tcp helper ready"));
+    assert!(captured_stdout_eventually(&process, "tcp helper ready"));
     drop(process);
     wait_until_closed(&address);
 }
@@ -60,7 +70,7 @@ fn builder_waits_for_successful_http_readiness() {
         .start()
         .expect("the second health response is successful");
 
-    assert!(process.stdout().contains("http helper ready"));
+    assert!(captured_stdout_eventually(&process, "http helper ready"));
     drop(process);
     wait_until_closed(&address);
 }

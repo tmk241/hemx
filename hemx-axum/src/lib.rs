@@ -5,19 +5,26 @@ use axum::http::{header, request::Parts, HeaderMap, HeaderValue, Request, Respon
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use futures_util::{Stream, StreamExt};
-use hemx_core::{BuildFingerprint, EffectBatch, FromForm, Handle, IntoEffect, SafeHtml, WireError};
+use hemx_core::{BuildFingerprint, EffectBatch, FromForm, Handle, Html, IntoEffect, WireError};
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, VecDeque};
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 
+mod action;
 mod forms;
+mod ledger;
 mod live;
 
+pub use action::{action, action_with_ledger, runtime_route, Native};
 pub use forms::{
     Form, FromInteractionForm, InteractionFile, InteractionForm, InteractionRequest,
     MultipartLimits,
+};
+pub use ledger::{
+    Claim, Ledger, LedgerLimits, MemoryLedger, Recorded, Token, HEMX_LEDGER_HEADER,
+    HEMX_TOKEN_HEADER,
 };
 pub use live::{Cursor, Live, Resume};
 
@@ -83,12 +90,21 @@ pub struct PageRequest {
     pub mode: PageMode,
 }
 
+/// A rendered page or partial, stamped with the build that rendered it.
+///
+/// It accepts only generated [`Html`], whose build fingerprint it stamps on
+/// every Hemx root and sends in the response header; there is no unchecked
+/// string constructor and no separate fingerprint step to forget.
+///
+/// ```compile_fail
+///
+/// let _ = hemx_axum::PageResponse::full(String::from("<main data-hemx-root></main>"));
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PageResponse {
-    pub mode: PageMode,
-    pub html: String,
-    pub title: Option<String>,
-    pub fingerprint: Option<BuildFingerprint>,
+    mode: PageMode,
+    html: Html,
+    title: Option<String>,
 }
 
 impl PageRequest {
@@ -102,26 +118,11 @@ impl PageRequest {
         matches!(self.mode, PageMode::Partial)
     }
 
-    pub fn page(
-        self,
-        partial_html: impl Into<String>,
-        shell: impl FnOnce(String) -> String,
-    ) -> PageResponse {
-        let partial_html = partial_html.into();
+    /// Answer a navigation: the full shell, or only the partial for Hemx navigation.
+    pub fn page(self, partial: Html, shell: impl FnOnce(Html) -> Html) -> PageResponse {
         match self.mode {
-            PageMode::Full => PageResponse::full(shell(partial_html)),
-            PageMode::Partial => PageResponse::partial(partial_html),
-        }
-    }
-
-    pub fn page_html<P, S>(self, partial_html: P, shell: impl FnOnce(P) -> S) -> PageResponse
-    where
-        P: Into<SafeHtml>,
-        S: Into<SafeHtml>,
-    {
-        match self.mode {
-            PageMode::Full => PageResponse::full(shell(partial_html).into().into_string()),
-            PageMode::Partial => PageResponse::partial(partial_html.into().into_string()),
+            PageMode::Full => PageResponse::full(shell(partial)),
+            PageMode::Partial => PageResponse::partial(partial),
         }
     }
 }
@@ -138,21 +139,19 @@ where
 }
 
 impl PageResponse {
-    pub fn full(html: impl Into<String>) -> Self {
+    pub fn full(html: Html) -> Self {
         Self {
             mode: PageMode::Full,
-            html: html.into(),
+            html,
             title: None,
-            fingerprint: None,
         }
     }
 
-    pub fn partial(html: impl Into<String>) -> Self {
+    pub fn partial(html: Html) -> Self {
         Self {
             mode: PageMode::Partial,
-            html: html.into(),
+            html,
             title: None,
-            fingerprint: None,
         }
     }
 
@@ -161,9 +160,12 @@ impl PageResponse {
         self
     }
 
-    pub fn fingerprint(mut self, fingerprint: BuildFingerprint) -> Self {
-        self.fingerprint = Some(fingerprint);
-        self
+    pub fn mode(&self) -> PageMode {
+        self.mode
+    }
+
+    pub fn html(&self) -> &Html {
+        &self.html
     }
 }
 
@@ -900,7 +902,7 @@ impl HandlerRegistry {
         &self,
         form: InteractionForm,
     ) -> Result<EffectResponse, DispatchRejection> {
-        form.require_build(self.fingerprint)?;
+        self.validate_dispatch(&form)?;
         let handle_id = form.handle_id;
         if let Some(handler) = self.async_handlers.get(&handle_id) {
             return Ok(EffectResponse {
@@ -908,6 +910,15 @@ impl HandlerRegistry {
             });
         }
         self.dispatch(form)
+    }
+
+    // Shared with ledger admission: a cached response must not bypass dispatch guards.
+    fn validate_dispatch(&self, form: &InteractionForm) -> Result<(), DispatchRejection> {
+        form.require_build(self.fingerprint)?;
+        if !self.contains(form.handle_id) {
+            return Err(DispatchRejection::UnknownHandle(form.handle_id));
+        }
+        Ok(())
     }
 
     pub fn contains(&self, handle_id: u32) -> bool {
@@ -1087,10 +1098,8 @@ impl PageMode {
 
 impl IntoResponse for PageResponse {
     fn into_response(self) -> axum::response::Response {
-        let html = match self.fingerprint {
-            Some(fingerprint) => html_with_root_fingerprint(self.html, fingerprint),
-            None => self.html,
-        };
+        let fingerprint = self.html.build();
+        let html = html_with_root_fingerprint(self.html.into_string(), fingerprint);
         let mut response = Response::new(Body::from(html));
         response.headers_mut().insert(
             header::CONTENT_TYPE,
@@ -1101,11 +1110,9 @@ impl IntoResponse for PageResponse {
                 .headers_mut()
                 .insert(HEMX_PARTIAL_HEADER, HeaderValue::from_static("true"));
         }
-        if let Some(fingerprint) = self.fingerprint {
-            response
-                .headers_mut()
-                .insert(HEMX_FINGERPRINT_HEADER, fingerprint_header(fingerprint));
-        }
+        response
+            .headers_mut()
+            .insert(HEMX_FINGERPRINT_HEADER, fingerprint_header(fingerprint));
         if let Some(title) = self
             .title
             .and_then(|title| HeaderValue::from_str(&title).ok())
@@ -1116,13 +1123,15 @@ impl IntoResponse for PageResponse {
     }
 }
 
-/// Stamp every actual `data-hemx-root` start tag that lacks a build fingerprint.
+/// Stamp every actual `data-hemx-root` start tag with the typed Html's build.
+/// Authored build attributes on roots are replaced, including duplicates.
 ///
 /// Scan tags rather than substrings: text, comments, raw text, and attribute
 /// values must neither select a different element nor suppress a real root.
 fn html_with_root_fingerprint(mut html: String, fingerprint: BuildFingerprint) -> String {
     let lower = html.to_ascii_lowercase(); // ASCII lowering preserves byte offsets.
-    let mut stamps = Vec::new();
+    let stamp = format!(" data-hemx-build=\"{}\"", fingerprint.0);
+    let mut edits = Vec::new();
     let mut at = 0;
     while let Some(offset) = lower[at..].find('<') {
         let start = at + offset;
@@ -1136,8 +1145,11 @@ fn html_with_root_fingerprint(mut html: String, fingerprint: BuildFingerprint) -
             at = start + 1;
             continue;
         };
-        if tag.root && !tag.build {
-            stamps.push(tag.attributes_end);
+        if tag.root {
+            for attribute in tag.build_attributes {
+                edits.push((attribute, ""));
+            }
+            edits.push((tag.attributes_end..tag.attributes_end, stamp.as_str()));
         }
         at = tag.end;
         let name = &lower[start + 1..tag.name_end];
@@ -1158,9 +1170,8 @@ fn html_with_root_fingerprint(mut html: String, fingerprint: BuildFingerprint) -
             at = lower[at..].find(&close).map_or(lower.len(), |end| at + end);
         }
     }
-    let stamp = format!(" data-hemx-build=\"{}\"", fingerprint.0);
-    for position in stamps.into_iter().rev() {
-        html.insert_str(position, &stamp);
+    for (range, replacement) in edits.into_iter().rev() {
+        html.replace_range(range, replacement);
     }
     html
 }
@@ -1170,7 +1181,7 @@ struct StartTag {
     attributes_end: usize,
     end: usize,
     root: bool,
-    build: bool,
+    build_attributes: Vec<std::ops::Range<usize>>,
 }
 
 /// Parse one start tag in ASCII-lowercased HTML; `None` means "not a start tag".
@@ -1189,7 +1200,7 @@ fn start_tag(html: &str, start: usize) -> Option<StartTag> {
         attributes_end: at,
         end: at,
         root: false,
-        build: false,
+        build_attributes: Vec::new(),
     };
     loop {
         while bytes.get(at)?.is_ascii_whitespace() || bytes[at] == b'/' {
@@ -1205,7 +1216,6 @@ fn start_tag(html: &str, start: usize) -> Option<StartTag> {
         }
         let name = &html[name_start..at];
         tag.root |= name == "data-hemx-root";
-        tag.build |= name == "data-hemx-build";
         let mut value_at = at;
         while bytes.get(value_at)?.is_ascii_whitespace() {
             value_at += 1;
@@ -1227,6 +1237,9 @@ fn start_tag(html: &str, start: usize) -> Option<StartTag> {
                     end
                 }
             };
+        }
+        if name == "data-hemx-build" {
+            tag.build_attributes.push(name_start..at);
         }
         tag.attributes_end = at;
     }
@@ -1367,7 +1380,7 @@ impl<B: Borrow<EffectBatch>> Borrow<EffectBatch> for Frame<B> {
 }
 
 /// Batches waiting for the client are coalesced within the wire budget
-/// Every intermediate operation remains in order; only envelopes
+///. Every intermediate operation remains in order; only envelopes
 /// are combined. Side effects and differing builds remain separate frames.
 struct Folding<S, B> {
     inner: Pin<Box<S>>,
@@ -1531,6 +1544,29 @@ mod tests {
         Selector::parse(value).expect("test selector parses")
     }
 
+    #[tokio::test]
+    async fn body_read_failure_is_recorded_as_a_terminal_500() {
+        use super::{action::record_action, Claim, Ledger, LedgerLimits, MemoryLedger, Token};
+        use axum::{body::Bytes, http::StatusCode, response::Response};
+        use std::time::Duration;
+
+        let ledger = MemoryLedger::new(LedgerLimits {
+            entries: 1,
+            bytes: 4096,
+            age: Duration::from_secs(600),
+        });
+        let token = Token::parse("0123456789abcdef").unwrap();
+        assert_eq!(ledger.claim(&token, 7).await, Claim::New);
+        let body = Body::from_stream(stream::iter([
+            Ok(Bytes::from_static(b"partial response")),
+            Err(std::io::Error::other("broken response body")),
+        ]));
+        let recorded = record_action(&ledger, &token, async move { Response::new(body) }).await;
+        assert_eq!(recorded.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(recorded.body, "the action failed");
+        assert_eq!(ledger.claim(&token, 7).await, Claim::Done(recorded));
+    }
+
     #[test]
     fn root_fingerprint_is_added_to_initial_root() {
         let html = html_with_root_fingerprint(
@@ -1548,7 +1584,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_root_fingerprint_is_preserved() {
+    fn existing_root_fingerprint_is_replaced_with_the_html_build() {
         let html = html_with_root_fingerprint(
             "<main data-hemx-root data-hemx-build=\"1\">Docs</main>".into(),
             BuildFingerprint(99),
@@ -1559,10 +1595,9 @@ mod tests {
             .select(&selector("main[data-hemx-root]"))
             .next()
             .expect("root element is rendered");
-        assert_eq!(root.value().attr("data-hemx-build"), Some("1"));
+        assert_eq!(root.value().attr("data-hemx-build"), Some("99"));
         assert_eq!(root.text().collect::<String>(), "Docs");
         assert_eq!(html.matches("data-hemx-build=").count(), 1);
-        assert!(!html.contains("data-hemx-build=\"99\""));
     }
 
     #[test]
@@ -1588,7 +1623,7 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(stamped, [("outer", "99"), ("nested", "99"), ("kept", "1")]);
+        assert_eq!(stamped, [("outer", "99"), ("nested", "99"), ("kept", "99")]);
         let paragraph = document.select(&selector("p")).next().unwrap();
         assert_eq!(paragraph.value().attr("title"), Some("a > data-hemx-root"));
         assert!(html.contains("<title>data-hemx-root data-hemx-build=</title>"));

@@ -154,7 +154,64 @@ impl AsRef<str> for SafeHtml {
     }
 }
 
+// Both types only hold markup someone vouched for (`SafeHtml::trusted`) or a
+// template rendered, so Hemplate's raw interpolation `{+= =+}` accepts them.
+impl hemplate_runtime::HtmlValue for SafeHtml {}
+impl hemplate_runtime::HtmlValue for Html {}
+
 impl core::fmt::Display for SafeHtml {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// HTML rendered from the lowered templates of one build.
+///
+/// Only generated rendering constructs it, so the markup already carries its
+/// final Hemx markers and a page response can stamp the matching build.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Html {
+    html: SafeHtml,
+    build: BuildFingerprint,
+}
+
+impl Html {
+    /// Generated rendering only: `html` comes from templates lowered for `build`.
+    #[doc(hidden)]
+    pub fn __rendered(html: impl Into<String>, build: BuildFingerprint) -> Self {
+        Self {
+            html: SafeHtml(html.into()),
+            build,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.html.as_str()
+    }
+
+    pub fn into_string(self) -> String {
+        self.html.into_string()
+    }
+
+    /// The build whose templates produced this markup.
+    pub fn build(&self) -> BuildFingerprint {
+        self.build
+    }
+}
+
+impl From<Html> for SafeHtml {
+    fn from(value: Html) -> Self {
+        value.html
+    }
+}
+
+impl AsRef<str> for Html {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl core::fmt::Display for Html {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -606,19 +663,7 @@ impl<T> Slot<T> {
 
     /// Patch this slot with escaped text, not interpreted markup.
     pub fn text(self, value: impl ToString) -> Effect {
-        let text = value.to_string();
-        let mut escaped = String::with_capacity(text.len());
-        for character in text.chars() {
-            match character {
-                '&' => escaped.push_str("&amp;"),
-                '<' => escaped.push_str("&lt;"),
-                '>' => escaped.push_str("&gt;"),
-                '"' => escaped.push_str("&quot;"),
-                '\'' => escaped.push_str("&#39;"),
-                _ => escaped.push(character),
-            }
-        }
-        self.html(SafeHtml::trusted(escaped))
+        self.html(escaped_text(value))
     }
 
     pub fn html(self, value: impl Into<SafeHtml>) -> Effect {
@@ -628,6 +673,22 @@ impl<T> Slot<T> {
             html: value.into(),
         }
     }
+}
+
+fn escaped_text(value: impl ToString) -> SafeHtml {
+    let text = value.to_string();
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(character),
+        }
+    }
+    SafeHtml::trusted(escaped)
 }
 
 #[derive(Debug, Eq, PartialEq, Hash)]
@@ -665,19 +726,12 @@ where
         self.id
     }
 
+    /// Patch this keyed slot with escaped text, not interpreted markup.
     pub fn replace_text(self, key: K, value: T) -> Effect
     where
         T: ToString,
     {
-        let key = key.to_string();
-        Effect::Patch {
-            target: ResourceRef {
-                resource: self.id,
-                scope: Some(ScopeKey::KeyValue(key)),
-            },
-            mode: PatchMode::Morph,
-            html: SafeHtml::trusted(value.to_string()),
-        }
+        self.replace_html(key, escaped_text(value))
     }
 
     pub fn replace_html(self, key: K, value: impl Into<SafeHtml>) -> Effect {

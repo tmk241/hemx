@@ -40,7 +40,7 @@ async function observeTimeouts({ observe, waitFor, pause }) {
     ["long", "long", "15s"], ["local", "slow", null], ["standalone", "slow", "2s"],
     ["queue", "queue", "2s"], ["bare", "quick", "1000"], ["ms", "quick", " 1000ms "],
     ["seconds", "quick", "1s"], ["whitespace", "quick", "\uFEFF1000ms\uFEFF"], ["max", "quick", "2147483647ms"], ["max-seconds", "quick", "2147483s"],
-    ["short", "slow", "250ms"], ["body", "body", "250ms"], ["upload", "upload", "250ms"],
+    ["short", "slow", "250ms"], ["body", "body", "250ms"], ["upload", "upload", "1000ms"],
   ]) {
     const fails = ["short", "body", "upload"].includes(id);
     await observe(`timeouts-${id}`, markup(id, kind, timeout, id === "standalone", id === "queue" ? "queue" : "drop"), async (w, d) => {

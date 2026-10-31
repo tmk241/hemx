@@ -1,5 +1,3 @@
 <main data-hemx-root="room">
-  <section data-hemx-slot="counter">
-    <strong>Count: {+ self.count +}</strong>
-  </section>
+  <section data-hemx-slot="counter"><strong>Count: {+ self.count +}</strong></section>
 </main>

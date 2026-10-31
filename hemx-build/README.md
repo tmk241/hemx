@@ -3,12 +3,45 @@
 Build-time Hemplate analysis and typed resource generation for Hemx applications.
 
 Call `hemx_build::app().template_dir("templates").run()` from `build.rs`, then
-include `hemx.generated.rs` from `OUT_DIR` through `#[hemx::surface]`. Resources
-are exported under their template's generated module. `.global_exports(true)`
-also exports application-wide aliases.
+include the generated resources with `#[hemx::surface] pub mod heml {}`.
+Resources are exported only under their template's module, such as
+`heml::page::count`; they never enter the application's own scope, so a
+template binding or module named like a resource cannot collide with it. The
+generated file compiles only inside that surface module; a bare `include!` of
+`hemx.generated.rs` fails.
+
+A `#[hemx::form("name")]` model must match the controls inside the
+`<form data-hemx-form="name">` element of the template that declares it. A model
+field without such a control fails to compile with a diagnostic naming the
+form, the field and that template; a control rendered by a nested view does not
+belong to the outer form's contract.
+
+## Canonical template layout
+
+`app().run()` checks every `.heml` file recursively under the selected template
+directory before generating artifacts, including when precomputed surfaces are
+supplied or `OUT_DIR` is absent. Files backing supplied surfaces are checked too.
+One error names all noncanonical files and the fix command:
+
+```console
+hemplate-fmt templates
+```
+
+For a custom `template_dir`, pass that directory to the formatter instead.
+`hemplate-fmt --check templates` lists differences without rewriting. Hemplate's
+formatter preserves rendered output, attribute order, quote style, Rust
+expressions, and raw/preformatted content. Invalid templates receive source-path
+and position diagnostics and are not rewritten by the formatter.
+
+Only an explicit `.check_format(false)` disables this check:
+
+```rust,ignore
+hemx_build::app().check_format(false).run()?;
+```
+
+This opt-out affects layout checking only, not resource validation or transforms.
 
 ## Slots, rows, and collections
-
 
 Declare collections explicitly, including initially empty ones:
 
@@ -51,8 +84,15 @@ For example:
 ```
 
 This declares `row_body.replace(row)` and `.replace_keyed(key, &view)`. It does
-not declare a collection. A list tag or descendant loop never turns an ordinary
-slot into a collection.
+not declare a collection.
+
+For a keyed row, `replace` reconciles the row itself when the view renders
+one element carrying that row's `data-hemx-key`; it never nests that wrapper.
+The same applies to keyed patches addressed through a collection. An explicit
+row resource also accepts content-only HTML, which morphs the existing row's
+content and leaves its host in place. Ordinary, unkeyed slots always morph
+content. A list tag or descendant loop never turns an ordinary slot into a
+collection.
 
 An element may declare only one of `data-hemx-slot`, `data-hemx-collection`,
 and `data-hemx-form`: they lower to the same `data-hemx-resource` marker.
@@ -80,12 +120,24 @@ resources retain their own generated IDs.
 
 ## Composed rendering and determinism
 
+Lowering happens while templates compile. `run()` writes one Hemplate transform
+per template into `OUT_DIR` and points the derive macro at it with
+`cargo:rustc-env`. The transform replaces authored markers with runtime markers
+and inserts the hidden `__h` / `__b` fields into handled forms, using the
+complete application table, so nested child and grandchild templates are final
+wherever they render. `template_dir` may select `templates/` or one of its
+subdirectories under the package root. Hemplate's derive does not read Hemx
+transforms for files outside that tree; `run()` rejects those files with a
+source-path diagnostic. Move them under `templates/` and use Hemplate's
+`#[hemplate = "subdirectory"]` attribute when needed.
 
-All generated rendering helpers use one complete application lowering table,
-including nested child and grandchild resources and handles. The destination
-slot's name does not select a component-specific table. Authoring names must
-remain globally unique across templates for each resource kind; ambiguous names
-are rejected, never guessed or assigned fallback IDs.
+Nothing rewrites rendered HTML: interpolated text and
+trusted raw HTML keep any marker-like text unchanged. Resource names must be
+static; `+data-hemx-slot` and the other dynamic spellings are rejected. A
+handled form needs a closing tag (`<form ...></form>`) to hold its fields; a
+self-closing `<form .../>` is rejected.
+Authoring names must remain globally unique across templates for each resource
+kind; ambiguous names are rejected, never guessed or assigned fallback IDs.
 
 Resource IDs remain deterministic from resource kind and template/name. Slot
 role is part of the semantic build fingerprint, so changing an ordinary slot to

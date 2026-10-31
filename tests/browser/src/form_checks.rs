@@ -18,8 +18,18 @@ pub fn assert_admission(report: &Value, checked: &mut BTreeSet<String>) {
         let requests = observed["requests"].as_array().unwrap();
         assert_eq!(requests.len(), usize::from(!canceled), "{name}");
         assert_eq!(observed["diagnostics"], json!([]), "{name}");
-        let data_events = if name == "manual-data" { 2 } else { 1 };
-        assert_eq!(observed["dataEvents"], data_events, "{name}");
+        // Hemx copies the entries the browser serialized for the navigation and
+        // never serializes the form again; only the app's own `new FormData`
+        // in "manual-data" counts. Browsers may fire `formdata` more than once
+        // for one navigation (Chromium also builds `NavigateEvent.formData`),
+        // so the event count is only a lower bound.
+        let app_serializations = usize::from(name.starts_with("manual-data"));
+        assert_eq!(observed["serialized"], app_serializations, "{name}");
+        let native = usize::from(!canceled);
+        assert!(
+            observed["dataEvents"].as_u64().unwrap() >= (app_serializations + native) as u64,
+            "{name}"
+        );
         assert_eq!(
             observed["vetoes"],
             usize::from(name == "late-navigate-veto" || canceled)
